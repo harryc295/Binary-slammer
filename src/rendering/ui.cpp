@@ -13,6 +13,8 @@
 #include "../data/api_descriptions.h"
 #include "../data/section_flags.h"
 #include "../decompiler/lifter.h"
+#include "../analysis/cfg.h"
+#include "../ir/ir_lifter.h"
 #include "file_prompt.h"
 #include "nav_state.h"
 
@@ -32,6 +34,8 @@ static std::vector<string_t>    g_strings;
 static std::vector<function_t>  g_functions;
 static std::vector<disasm_t>         g_disasm;
 static std::vector<pseudo_line_t>    g_pseudo_code;
+static IRResult                      g_ir_result;
+static CFG                           g_cfg;
 static size_t                        g_current_func_rva = 0;
 static int                           g_selected_func    = -1;
 
@@ -43,6 +47,8 @@ static void rebuild_cache() {
     g_functions = open_binary.get_functions();
     g_disasm.clear();
     g_pseudo_code.clear();
+    g_ir_result = {};
+    g_cfg       = {};
     g_selected_func    = -1;
     g_current_func_rva = 0;
 
@@ -82,6 +88,10 @@ static void disassemble_function(const function_t &fn) {
         call_map[f.rva] = f.name;
 
     g_pseudo_code = Lifter::lift(g_disasm, open_binary.is_64bit(), call_map);
+
+    // Build CFG and lift to LLVM IR
+    g_cfg       = CFG::build(g_disasm);
+    g_ir_result = IRLifter::lift(g_cfg, open_binary.is_64bit(), fn.name, call_map);
 }
 
 // ── Shannon entropy ───────────────────────────────────────────────────────
@@ -778,6 +788,86 @@ static void render_pseudo_code() {
     ImGui::End();
 }
 
+static void render_ir_panel() {
+    ImGui::Begin("LLVM IR");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    if (!g_ir_result.valid) {
+        if (!g_ir_result.error.empty())
+            ImGui::TextColored(ImVec4(1.f,.4f,.4f,1.f), "Lift error: %s", g_ir_result.error.c_str());
+        else
+            ImGui::TextDisabled("Select a function to lift to LLVM IR.");
+        ImGui::End(); return;
+    }
+
+    static bool show_optimized = true;
+    static bool show_raw       = false;
+    ImGui::Checkbox("Optimized", &show_optimized);
+    ImGui::SameLine();
+    ImGui::Checkbox("Raw", &show_raw);
+    ImGui::SameLine();
+    ImGui::TextDisabled("  %zu blocks", g_cfg.blocks.size());
+    ImGui::Separator();
+
+    const std::string &ir = show_optimized ? g_ir_result.opt_ir : g_ir_result.raw_ir;
+
+    // Split IR into lines and render with syntax colouring
+    const ImVec4 col_def    = ImVec4(0.85f, 0.85f, 0.85f, 1.f);
+    const ImVec4 col_kw     = ImVec4(0.56f, 0.74f, 1.0f,  1.f);  // define/br/ret/call
+    const ImVec4 col_label  = ImVec4(0.90f, 0.70f, 0.30f, 1.f);  // bb_XXXXXX:
+    const ImVec4 col_meta   = ImVec4(0.50f, 0.80f, 0.50f, 1.f);  // ; comments / attributes
+    const ImVec4 col_type   = ImVec4(0.70f, 0.90f, 0.70f, 1.f);  // i64 / i32 etc.
+
+    ImGui::BeginChild("##ir_body", ImVec2(0,0), false, ImGuiWindowFlags_HorizontalScrollbar);
+
+    // Build line list once per IR change
+    static std::string cached_ir;
+    static std::vector<std::string> cached_lines;
+    if (cached_ir != ir) {
+        cached_ir = ir;
+        cached_lines.clear();
+        size_t pos = 0;
+        while (pos < ir.size()) {
+            size_t nl = ir.find('\n', pos);
+            if (nl == std::string::npos) nl = ir.size();
+            cached_lines.push_back(ir.substr(pos, nl - pos));
+            pos = nl + 1;
+        }
+    }
+
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(cached_lines.size()));
+    while (clipper.Step()) {
+        for (int i = clipper.DisplayStart; i < clipper.DisplayEnd; ++i) {
+            const std::string &line = cached_lines[i];
+            if (line.empty()) { ImGui::Spacing(); continue; }
+
+            ImVec4 col = col_def;
+            const char *t = line.c_str();
+            // Skip leading spaces for keyword check
+            while (*t == ' ') ++t;
+
+            if (*t == ';')
+                col = col_meta;
+            else if (strncmp(t, "define", 6) == 0 || strncmp(t, "declare", 7) == 0 ||
+                     strncmp(t, "attributes", 10) == 0)
+                col = col_kw;
+            else if (strncmp(t, "br ", 3) == 0 || strncmp(t, "ret ", 4) == 0 ||
+                     strncmp(t, "call ", 5) == 0 || strncmp(t, "unreachable", 11) == 0)
+                col = col_kw;
+            else if (line.back() == ':' && line.find(' ') == std::string::npos)
+                col = col_label;  // basic block label
+            else if (strncmp(t, "%", 1) == 0 && line.find(" = ") != std::string::npos)
+                col = col_def;
+
+            ImGui::TextColored(col, "%s", line.c_str());
+        }
+    }
+    clipper.End();
+    ImGui::EndChild();
+    ImGui::End();
+}
+
 static void render_console() {
     ImGui::Begin("Console");
 
@@ -828,7 +918,8 @@ bool UI::render_frame() {
             ImGui::MenuItem("Disassembly");       ImGui::MenuItem("Exports");
             ImGui::MenuItem("Imports");           ImGui::MenuItem("Hex View");
             ImGui::MenuItem("Strings");           ImGui::MenuItem("PE Headers");
-            ImGui::MenuItem("Pseudo Code");       ImGui::MenuItem("Console");
+            ImGui::MenuItem("Pseudo Code");       ImGui::MenuItem("LLVM IR");
+            ImGui::MenuItem("Console");
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
@@ -908,6 +999,7 @@ bool UI::render_frame() {
         ImGui::DockBuilderDockWindow("Imports",           lb);
         ImGui::DockBuilderDockWindow("Disassembly",       rtl);
         ImGui::DockBuilderDockWindow("Pseudo Code",       rtl);
+        ImGui::DockBuilderDockWindow("LLVM IR",           rtl);
         ImGui::DockBuilderDockWindow("Hex View",          rtr);
         ImGui::DockBuilderDockWindow("PE Headers",        rtr);
         ImGui::DockBuilderDockWindow("Strings",           rtr);
@@ -927,6 +1019,7 @@ bool UI::render_frame() {
     render_strings_panel();
     render_pe_headers();
     render_pseudo_code();
+    render_ir_panel();
     render_console();
 
     // ── Flush ─────────────────────────────────────────────────────────────

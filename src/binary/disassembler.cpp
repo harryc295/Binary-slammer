@@ -169,10 +169,12 @@ std::vector<disasm_t> Disassembler::disassemble(const uint8_t *data,
         d.mnemonic = mnemonic;
         d.operands = operands;
         d.tooltip  = build_tooltip(mnem_upper, insn, ops);
-        d.is_ret   = (insn.meta.category == ZYDIS_CATEGORY_RET);
-        d.is_call  = (insn.meta.category == ZYDIS_CATEGORY_CALL);
-        d.is_jump  = (insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
-                      insn.meta.category == ZYDIS_CATEGORY_COND_BR);
+        d.is_ret       = (insn.meta.category == ZYDIS_CATEGORY_RET);
+        d.is_call      = (insn.meta.category == ZYDIS_CATEGORY_CALL);
+        d.is_jump      = (insn.meta.category == ZYDIS_CATEGORY_UNCOND_BR ||
+                          insn.meta.category == ZYDIS_CATEGORY_COND_BR);
+        d.is_cond_jump = (insn.meta.category == ZYDIS_CATEGORY_COND_BR);
+        d.zydis_mnemonic = static_cast<uint32_t>(insn.mnemonic);
 
         // Resolve direct branch/call target
         if ((d.is_call || d.is_jump) &&
@@ -181,6 +183,55 @@ std::vector<disasm_t> Disassembler::disassemble(const uint8_t *data,
             ops[0].imm.is_relative) {
             d.branch_target = base_rva + offset + insn.length +
                               static_cast<int64_t>(ops[0].imm.value.s);
+        }
+
+        // Populate structured operands for IR lifting
+        d.raw_op_count = 0;
+        for (ZyanU8 oi = 0; oi < insn.operand_count_visible &&
+                            oi < static_cast<ZyanU8>(d.raw_ops.size()); ++oi) {
+            const auto &zo = ops[oi];
+            RawOp &ro = d.raw_ops[d.raw_op_count++];
+            ro.size_bytes = static_cast<uint8_t>(zo.size / 8);
+            if (ro.size_bytes == 0) ro.size_bytes = 1;
+
+            switch (zo.type) {
+            case ZYDIS_OPERAND_TYPE_REGISTER: {
+                ro.kind = OpKind::Reg;
+                const char *name = ZydisRegisterGetString(zo.reg.value);
+                ro.reg = name ? name : "";
+                break;
+            }
+            case ZYDIS_OPERAND_TYPE_IMMEDIATE:
+                ro.kind = OpKind::Imm;
+                ro.imm_unsigned = !zo.imm.is_signed;
+                ro.imm = zo.imm.is_signed
+                         ? zo.imm.value.s
+                         : static_cast<int64_t>(zo.imm.value.u);
+                // Resolve relative immediate for branches
+                if (zo.imm.is_relative)
+                    ro.imm = static_cast<int64_t>(base_rva + offset + insn.length)
+                             + zo.imm.value.s;
+                break;
+            case ZYDIS_OPERAND_TYPE_MEMORY: {
+                ro.kind = OpKind::Mem;
+                ro.mem.size_bytes = ro.size_bytes;
+                if (zo.mem.base != ZYDIS_REGISTER_NONE) {
+                    const char *n = ZydisRegisterGetString(zo.mem.base);
+                    ro.mem.base = n ? n : "";
+                }
+                if (zo.mem.index != ZYDIS_REGISTER_NONE) {
+                    const char *n = ZydisRegisterGetString(zo.mem.index);
+                    ro.mem.index = n ? n : "";
+                }
+                ro.mem.scale = zo.mem.scale ? zo.mem.scale : 1;
+                ro.mem.disp  = zo.mem.disp.has_displacement
+                               ? zo.mem.disp.value : 0;
+                break;
+            }
+            default:
+                ro.kind = OpKind::None;
+                break;
+            }
         }
 
         out.push_back(std::move(d));
