@@ -1,5 +1,9 @@
 #include "ir_lifter.h"
 
+#ifdef _MSC_VER
+#pragma warning(push, 0)
+#endif
+
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/DerivedTypes.h>
@@ -22,6 +26,10 @@
 #include <llvm/Transforms/Scalar/SROA.h>
 #include <llvm/Transforms/Scalar/SimplifyCFG.h>
 #include <llvm/Transforms/Utils/Mem2Reg.h>
+
+#ifdef _MSC_VER
+#pragma warning(pop)
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -187,14 +195,14 @@ struct Ctx {
         write_flag("zf", b.CreateICmpEQ(res, llvm::ConstantInt::get(res->getType(), 0)));
         write_flag("sf", b.CreateICmpSLT(res, llvm::ConstantInt::get(res->getType(), 0)));
         // CF = unsigned overflow
-        auto *uadd = llvm::Intrinsic::getOrInsertDeclaration(
+        auto *uadd = llvm::Intrinsic::getDeclaration(
             fn->getParent(), llvm::Intrinsic::uadd_with_overflow,
             {llvm::IntegerType::get(lctx, bits)});
         llvm::Value *ures = b.CreateCall(
             llvm::cast<llvm::Function>(uadd), {a, b_val});
         write_flag("cf", b.CreateExtractValue(ures, 1));
         // OF = signed overflow
-        auto *sadd = llvm::Intrinsic::getOrInsertDeclaration(
+        auto *sadd = llvm::Intrinsic::getDeclaration(
             fn->getParent(), llvm::Intrinsic::sadd_with_overflow,
             {llvm::IntegerType::get(lctx, bits)});
         llvm::Value *sres = b.CreateCall(
@@ -209,7 +217,7 @@ struct Ctx {
         // CF = a < b_val (unsigned borrow)
         write_flag("cf", b.CreateICmpULT(a, b_val));
         // OF = signed overflow on subtraction
-        auto *ssub = llvm::Intrinsic::getOrInsertDeclaration(
+        auto *ssub = llvm::Intrinsic::getDeclaration(
             fn->getParent(), llvm::Intrinsic::ssub_with_overflow,
             {llvm::IntegerType::get(lctx, bits)});
         llvm::Value *sres = b.CreateCall(
@@ -540,7 +548,7 @@ static void lift_insn(Ctx &ctx, const disasm_t &d,
     // Conditional jumps — check mnemonic
     auto emit_condbr = [&](llvm::Value *cond, uint64_t true_rva) {
         auto tit = ctx.bb_map.find(true_rva);
-        if (!tit) return;
+        if (tit == ctx.bb_map.end()) return;
         // Fall-through block: next instruction after the jump
         uint64_t ft_rva = d.address + d.bytes.size();
         auto fit = ctx.bb_map.find(ft_rva);

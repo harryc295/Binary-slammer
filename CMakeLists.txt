@@ -52,7 +52,6 @@ if (MSVC)
   target_compile_options(app PRIVATE
     /W3
     /MP
-    /WX
     /ZI
   )
 else()
