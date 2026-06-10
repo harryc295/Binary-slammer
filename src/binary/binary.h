@@ -450,6 +450,9 @@ public:
   // ── Strings ───────────────────────────────────────────────────────────────
 
   std::vector<string_t> get_strings(size_t min_len = 5) const {
+#ifndef _WIN32
+    return {};
+#else
     if (!is_open()) return {};
 
     const auto *data = reinterpret_cast<const uint8_t *>(m_view);
@@ -486,11 +489,15 @@ public:
     }
 
     return out;
+#endif
   }
 
   // ── Function list ─────────────────────────────────────────────────────────
 
   std::vector<function_t> get_functions() const {
+#ifndef _WIN32
+    return {};
+#else
     if (!is_open()) return {};
 
     std::vector<function_t> funcs;
@@ -534,6 +541,7 @@ public:
       }
     }
     return funcs;
+#endif
   }
 };
 
