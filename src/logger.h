@@ -22,18 +22,30 @@ public:
     open_logfile();
 
     time_t now = time(0);
-    struct tm* local_time = localtime(&now);
-    char* date_time = asctime(local_time);
-
+    struct tm local_time{};
+    char date_time[26]{};
+#ifdef _WIN32
+    localtime_s(&local_time, &now);
+    asctime_s(date_time, sizeof(date_time), &local_time);
+#else
+    localtime_r(&now, &local_time);
+    asctime_r(&local_time, date_time);
+#endif
     log("Session started at " + std::string(date_time), "Session Manager", true);
   }
 
   ~Logger()
   {
     time_t now = time(0);
-    struct tm* local_time = localtime(&now);
-    char* date_time = asctime(local_time);
-
+    struct tm local_time{};
+    char date_time[26]{};
+#ifdef _WIN32
+    localtime_s(&local_time, &now);
+    asctime_s(date_time, sizeof(date_time), &local_time);
+#else
+    localtime_r(&now, &local_time);
+    asctime_r(&local_time, date_time);
+#endif
     log("Session ended at " + std::string(date_time), "Session Manager", true);
   }
 

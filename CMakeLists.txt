@@ -1,7 +1,5 @@
 cmake_minimum_required(VERSION 3.28)
 
-set(CMAKE_TOOLCHAIN_FILE "/home/array/.local/share/vcpkg/scripts/buildsystems/vcpkg.cmake")
-
 project(binaryslammer)
 
 set(CMAKE_CXX_STANDARD 20)
@@ -9,6 +7,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 
 find_package(glfw3 CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
+find_package(Zydis CONFIG REQUIRED)
 
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
@@ -38,6 +37,7 @@ target_include_directories(app PRIVATE
 target_link_libraries(app PRIVATE
   OpenGL::GL
   glfw
+  Zydis::Zydis
 )
 
 if (MSVC)
