@@ -8,7 +8,8 @@
     {
       "name": "llvm",
       "default-features": false,
-      "features": ["enable-rtti"]
+      "features": ["enable-rtti"],
+      "platform": "!linux"
     }
   ]
 }
