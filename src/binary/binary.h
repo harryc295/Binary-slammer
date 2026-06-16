@@ -95,7 +95,7 @@ public:
   Binary() = default;
   ~Binary() { close(); }
 
-  Binary(std::string path) {
+  Binary([[maybe_unused]] std::string path) {
 #ifdef _WIN32
     std::wstring wpath(path.begin(), path.end());
 
@@ -449,7 +449,7 @@ public:
 
   // ── Strings ───────────────────────────────────────────────────────────────
 
-  std::vector<string_t> get_strings(size_t min_len = 5) const {
+  std::vector<string_t> get_strings([[maybe_unused]] size_t min_len = 5) const {
 #ifndef _WIN32
     return {};
 #else

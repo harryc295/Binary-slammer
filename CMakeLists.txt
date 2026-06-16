@@ -10,7 +10,7 @@ find_package(OpenGL REQUIRED)
 find_package(Zydis CONFIG REQUIRED)
 find_package(LLVM CONFIG REQUIRED)
 message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} found at ${LLVM_DIR}")
-include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
 
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
