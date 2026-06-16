@@ -58,7 +58,8 @@ jobs:
       shell: powershell
       run: |
         Write-Host "=== clang.exe location ==="
-        (Get-Command clang.exe -ErrorAction SilentlyContinue)?.Source
+        $clangCmd = Get-Command clang.exe -ErrorAction SilentlyContinue
+        if ($clangCmd) { Write-Host $clangCmd.Source } else { Write-Host "clang.exe not in PATH" }
         Write-Host "=== C:\Program Files\LLVM (depth 4) ==="
         if (Test-Path "C:\Program Files\LLVM") {
           Get-ChildItem "C:\Program Files\LLVM" -Depth 4 | ForEach-Object { Write-Host $_.FullName }
