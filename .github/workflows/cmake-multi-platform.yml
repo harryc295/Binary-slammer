@@ -65,11 +65,11 @@ jobs:
       if: runner.os == 'Windows' && steps.cache-llvm.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
-        Write-Host "Downloading LLVM 18.1.8 source..."
-        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-18.1.8.src.tar.xz" -OutFile "C:\llvm.tar.xz" -UseBasicParsing
-        tar -xf "C:\llvm.tar.xz" -C "C:\"
-        $srcDir = (Get-ChildItem "C:\" -Directory -Filter "llvm-*" | Select-Object -First 1).FullName
-        Write-Host "Source dir: $srcDir"
+        Write-Host "Downloading LLVM 18.1.8 monorepo source..."
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz" -OutFile "C:\llvm-src.tar.xz" -UseBasicParsing
+        Write-Host "Extracting llvm/ and cmake/ only..."
+        tar -xf "C:\llvm-src.tar.xz" -C "C:\" "llvm-project-18.1.8.src/llvm" "llvm-project-18.1.8.src/cmake"
+        Write-Host "Configuring LLVM..."
         cmake -B "C:\llvm-bld" `
           -DCMAKE_BUILD_TYPE=Release `
           -DLLVM_ENABLE_RTTI=ON `
@@ -79,7 +79,7 @@ jobs:
           -DLLVM_INCLUDE_EXAMPLES=OFF `
           -DLLVM_INCLUDE_BENCHMARKS=OFF `
           -DCMAKE_INSTALL_PREFIX="C:\llvm" `
-          -S $srcDir
+          -S "C:\llvm-project-18.1.8.src\llvm"
         cmake --build "C:\llvm-bld" --config Release -j8
         cmake --install "C:\llvm-bld" --config Release
         Write-Host "LLVM build and install complete"
