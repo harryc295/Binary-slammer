@@ -251,5 +251,46 @@ typedef struct _IMAGE_IMPORT_BY_NAME {
     char Name[1];
 } IMAGE_IMPORT_BY_NAME;
 
+// ── TLS Directory ──────────────────────────────────────────────────────────
+typedef struct _IMAGE_TLS_DIRECTORY32 {
+    DWORD StartAddressOfRawData;
+    DWORD EndAddressOfRawData;
+    DWORD AddressOfIndex;
+    DWORD AddressOfCallBacks;
+    DWORD SizeOfZeroFill;
+    DWORD Characteristics;
+} IMAGE_TLS_DIRECTORY32;
+
+typedef struct _IMAGE_TLS_DIRECTORY64 {
+    ULONGLONG StartAddressOfRawData;
+    ULONGLONG EndAddressOfRawData;
+    ULONGLONG AddressOfIndex;
+    ULONGLONG AddressOfCallBacks;
+    DWORD     SizeOfZeroFill;
+    DWORD     Characteristics;
+} IMAGE_TLS_DIRECTORY64;
+
+// ── Resource Directory ─────────────────────────────────────────────────────
+typedef struct _IMAGE_RESOURCE_DIRECTORY {
+    DWORD Characteristics;
+    DWORD TimeDateStamp;
+    WORD  MajorVersion;
+    WORD  MinorVersion;
+    WORD  NumberOfNamedEntries;
+    WORD  NumberOfIdEntries;
+} IMAGE_RESOURCE_DIRECTORY;
+
+typedef struct _IMAGE_RESOURCE_DIRECTORY_ENTRY {
+    DWORD NameOrId;        // bit 31: 0=ID in low 16 bits, 1=offset to name string
+    DWORD OffsetToData;    // bit 31: 0=data entry, 1=sub-directory offset
+} IMAGE_RESOURCE_DIRECTORY_ENTRY;
+
+typedef struct _IMAGE_RESOURCE_DATA_ENTRY {
+    DWORD OffsetToData;
+    DWORD Size;
+    DWORD CodePage;
+    DWORD Reserved;
+} IMAGE_RESOURCE_DATA_ENTRY;
+
 #endif // !_WIN32
 #endif // !_WIN32_HEADERS_H_

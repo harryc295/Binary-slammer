@@ -62,6 +62,43 @@ struct function_t {
   bool from_exports{};
 };
 
+struct overlay_info_t {
+  uint32_t offset{};
+  uint32_t size{};
+};
+
+struct pe_resource_type_t {
+  uint16_t id{};
+  std::string name;
+  uint32_t count{};
+};
+
+static inline const char *resource_type_name(uint16_t id) {
+  switch (id) {
+  case 1:  return "RT_CURSOR";
+  case 2:  return "RT_BITMAP";
+  case 3:  return "RT_ICON";
+  case 4:  return "RT_MENU";
+  case 5:  return "RT_DIALOG";
+  case 6:  return "RT_STRING";
+  case 7:  return "RT_FONTDIR";
+  case 8:  return "RT_FONT";
+  case 9:  return "RT_ACCELERATOR";
+  case 10: return "RT_RCDATA";
+  case 11: return "RT_MESSAGETABLE";
+  case 14: return "RT_GROUP_ICON";
+  case 16: return "RT_VERSION";
+  case 17: return "RT_DLGINCLUDE";
+  case 19: return "RT_PLUGPLAY";
+  case 20: return "RT_VXD";
+  case 21: return "RT_ANICURSOR";
+  case 22: return "RT_ANIICON";
+  case 23: return "RT_HTML";
+  case 24: return "RT_MANIFEST";
+  default: return nullptr;
+  }
+}
+
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
 static inline std::string rva_to_hex(uint64_t rva) {
@@ -263,6 +300,149 @@ public:
       combined += dll + '.' + fn;
     }
     return md5::hash(combined);
+  }
+
+  // TLS callbacks — returns RVAs (caller must subtract ImageBase from VAs)
+  std::vector<uint64_t> get_tls_callbacks() const {
+    if (!is_open()) return {};
+    const auto *dos = get_dos();
+    if (!dos) return {};
+
+    bool     b64    = is_64bit();
+    uint32_t tls_rva = 0;
+    uint64_t imgbase = 0;
+
+    if (b64) {
+      const auto *nt64 = get_ptr<IMAGE_NT_HEADERS64>(dos->e_lfanew);
+      if (!nt64) return {};
+      tls_rva = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+      imgbase = nt64->OptionalHeader.ImageBase;
+    } else {
+      const auto *nt32 = get_ptr<IMAGE_NT_HEADERS32>(dos->e_lfanew);
+      if (!nt32) return {};
+      tls_rva = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_TLS].VirtualAddress;
+      imgbase = (uint64_t)nt32->OptionalHeader.ImageBase;
+    }
+    if (!tls_rva) return {};
+    uint32_t tls_off = rva_to_offset(tls_rva);
+    if (!tls_off) return {};
+
+    std::vector<uint64_t> cbs;
+    if (b64) {
+      const auto *tls = get_ptr<IMAGE_TLS_DIRECTORY64>(tls_off);
+      if (!tls || !tls->AddressOfCallBacks) return {};
+      uint64_t cb_va = tls->AddressOfCallBacks;
+      if (cb_va < imgbase) return {};
+      uint32_t cb_off = rva_to_offset((uint32_t)(cb_va - imgbase));
+      if (!cb_off) return {};
+      for (size_t i = 0; i < 64; ++i) {
+        const auto *p = get_ptr<uint64_t>(cb_off + i * 8);
+        if (!p || !*p) break;
+        cbs.push_back(*p - imgbase);
+      }
+    } else {
+      const auto *tls = get_ptr<IMAGE_TLS_DIRECTORY32>(tls_off);
+      if (!tls || !tls->AddressOfCallBacks) return {};
+      uint64_t cb_va = (uint64_t)tls->AddressOfCallBacks;
+      if (cb_va < imgbase) return {};
+      uint32_t cb_off = rva_to_offset((uint32_t)(cb_va - imgbase));
+      if (!cb_off) return {};
+      for (size_t i = 0; i < 64; ++i) {
+        const auto *p = get_ptr<uint32_t>(cb_off + i * 4);
+        if (!p || !*p) break;
+        cbs.push_back((uint64_t)*p - imgbase);
+      }
+    }
+    return cbs;
+  }
+
+  // PE overlay — data after the last section's raw data
+  overlay_info_t get_overlay() const {
+    overlay_info_t ret{};
+    if (!is_open() || !m_file_size) return ret;
+    const auto *dos = get_dos();
+    if (!dos) return ret;
+    const auto *nt = get_ptr<IMAGE_NT_HEADERS>(dos->e_lfanew);
+    if (!nt) return ret;
+
+    WORD   num  = nt->FileHeader.NumberOfSections;
+    size_t base = (size_t)dos->e_lfanew + sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER) +
+                  nt->FileHeader.SizeOfOptionalHeader;
+
+    uint32_t max_end = 0;
+    for (WORD i = 0; i < num; ++i) {
+      const auto *s = get_ptr<IMAGE_SECTION_HEADER>(base + i * sizeof(IMAGE_SECTION_HEADER));
+      if (!s || !s->PointerToRawData || !s->SizeOfRawData) continue;
+      uint32_t end = s->PointerToRawData + s->SizeOfRawData;
+      if (end > max_end) max_end = end;
+    }
+    if (max_end && max_end < (uint32_t)m_file_size) {
+      ret.offset = max_end;
+      ret.size   = (uint32_t)m_file_size - max_end;
+    }
+    return ret;
+  }
+
+  // Resource directory — top-level resource types with entry counts
+  std::vector<pe_resource_type_t> get_resource_types() const {
+    if (!is_open()) return {};
+    const auto *dos = get_dos();
+    if (!dos) return {};
+
+    uint32_t res_rva = 0;
+    if (is_64bit()) {
+      const auto *nt64 = get_ptr<IMAGE_NT_HEADERS64>(dos->e_lfanew);
+      if (!nt64) return {};
+      res_rva = nt64->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress;
+    } else {
+      const auto *nt32 = get_ptr<IMAGE_NT_HEADERS32>(dos->e_lfanew);
+      if (!nt32) return {};
+      res_rva = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_RESOURCE].VirtualAddress;
+    }
+    if (!res_rva) return {};
+    uint32_t res_off = rva_to_offset(res_rva);
+    if (!res_off) return {};
+
+    const auto *dir = get_ptr<IMAGE_RESOURCE_DIRECTORY>(res_off);
+    if (!dir) return {};
+
+    uint32_t total = (uint32_t)dir->NumberOfNamedEntries + dir->NumberOfIdEntries;
+    std::vector<pe_resource_type_t> out;
+
+    for (uint32_t i = 0; i < total; ++i) {
+      size_t eoff = res_off + sizeof(IMAGE_RESOURCE_DIRECTORY) +
+                    i * sizeof(IMAGE_RESOURCE_DIRECTORY_ENTRY);
+      const auto *e = get_ptr<IMAGE_RESOURCE_DIRECTORY_ENTRY>(eoff);
+      if (!e) break;
+
+      pe_resource_type_t rt{};
+      if (e->NameOrId & 0x80000000u) {
+        // Named resource type — read the Unicode length-prefixed name
+        uint32_t noff = res_off + (e->NameOrId & 0x7FFFFFFFu);
+        const auto *lenp = get_ptr<uint16_t>(noff);
+        if (lenp) {
+          for (uint16_t j = 0; j < *lenp && j < 64; ++j) {
+            const auto *ch = get_ptr<uint16_t>(noff + 2 + j * 2);
+            if (ch && *ch < 128) rt.name += (char)*ch;
+          }
+        }
+        if (rt.name.empty()) rt.name = "(named)";
+        rt.id = 0xFFFFu;
+      } else {
+        rt.id = (uint16_t)(e->NameOrId & 0xFFFFu);
+        const char *known = resource_type_name(rt.id);
+        rt.name = known ? known : ("Type " + std::to_string(rt.id));
+      }
+
+      // Count entries in the sub-directory
+      if (e->OffsetToData & 0x80000000u) {
+        uint32_t suboff = res_off + (e->OffsetToData & 0x7FFFFFFFu);
+        const auto *sub = get_ptr<IMAGE_RESOURCE_DIRECTORY>(suboff);
+        if (sub) rt.count = (uint32_t)sub->NumberOfNamedEntries + sub->NumberOfIdEntries;
+      }
+      out.push_back(std::move(rt));
+    }
+    return out;
   }
 
   // ── PE helpers ────────────────────────────────────────────────────────────

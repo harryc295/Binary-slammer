@@ -12,8 +12,9 @@
 // Stored as "bh_XXXXXXXXXXXXXXXX.meta" in CWD (keyed by FNV-1a of binary path).
 namespace meta {
 
-inline std::unordered_map<uint64_t, std::string> names;    // RVA → custom name
-inline std::unordered_map<uint64_t, std::string> comments; // RVA → comment
+inline std::unordered_map<uint64_t, std::string> names;     // RVA → custom name
+inline std::unordered_map<uint64_t, std::string> comments;  // RVA → comment text
+inline std::unordered_map<uint64_t, std::string> bookmarks; // RVA → bookmark label
 
 inline uint64_t path_key(const std::string &p) {
     uint64_t h = 14695981039346656037ULL;
@@ -27,7 +28,7 @@ inline std::string meta_filename(const std::string &bin_path) {
 }
 
 inline void load(const std::string &bin_path) {
-    names.clear(); comments.clear();
+    names.clear(); comments.clear(); bookmarks.clear();
     std::ifstream f(meta_filename(bin_path));
     if (!f.is_open()) return;
     std::string line;
@@ -40,8 +41,9 @@ inline void load(const std::string &bin_path) {
         uint64_t rva = (uint64_t)strtoull(rva_s.c_str(), nullptr, 16);
         std::string rest;
         if (std::getline(ss >> std::ws, rest) && !rest.empty()) {
-            if      (type == "name")    names[rva]    = rest;
-            else if (type == "comment") comments[rva] = rest;
+            if      (type == "name")     names[rva]     = rest;
+            else if (type == "comment")  comments[rva]  = rest;
+            else if (type == "bookmark") bookmarks[rva] = rest;
         }
     }
 }
@@ -53,8 +55,10 @@ inline void save(const std::string &bin_path) {
         f << "name 0x" << std::hex << rva << ' ' << name << '\n';
     for (const auto &[rva, cmt] : comments)
         f << "comment 0x" << std::hex << rva << ' ' << cmt << '\n';
+    for (const auto &[rva, label] : bookmarks)
+        f << "bookmark 0x" << std::hex << rva << ' ' << label << '\n';
 }
 
-inline void clear() { names.clear(); comments.clear(); }
+inline void clear() { names.clear(); comments.clear(); bookmarks.clear(); }
 
 } // namespace meta

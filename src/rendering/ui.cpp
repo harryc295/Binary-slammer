@@ -1,9 +1,13 @@
 #include "ui.h"
 
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <fstream>
 #include <map>
 #include <string>
 #include <unordered_map>
@@ -19,6 +23,8 @@
 #include "../decompiler/lifter.h"
 #include "../analysis/cfg.h"
 #include "../analysis/md5.h"
+#include "../analysis/rich_header.h"
+#include "../analysis/security_analyzer.h"
 #include "../ir/ir_lifter.h"
 #include "file_prompt.h"
 #include "nav_state.h"
@@ -53,6 +59,30 @@ static std::string                   g_imphash;
 static std::vector<std::string>      g_section_hashes;
 static bool g_dark_theme    = true;
 static bool g_theme_changed = false;
+
+// Security analysis
+static std::vector<security_finding_t> g_security_findings;
+
+// TLS callbacks (RVAs)
+static std::vector<uint64_t> g_tls_callbacks;
+
+// PE overlay
+static overlay_info_t g_overlay{};
+
+// Resource types
+static std::vector<pe_resource_type_t> g_resource_types;
+
+// Navigation history (back/forward)
+struct nav_entry_t { uint64_t rva; std::string name; };
+static std::vector<nav_entry_t> g_nav_history;
+static int  g_nav_pos     = -1;
+static bool g_nav_back_fwd = false;
+
+// Byte pattern search
+static char g_search_pattern[256]{};
+struct search_result_t { uint32_t offset; std::vector<uint8_t> context; };
+static std::vector<search_result_t> g_search_results;
+static bool g_search_done = false;
 
 #ifdef HAVE_YARA
 struct YaraMatch { std::string rule; std::vector<std::pair<std::string,uint64_t>> hits; };
@@ -140,6 +170,37 @@ static void rebuild_cache() {
     build_xrefs();
     meta::load(open_binary.get_path());
 
+    // Security analysis (import scan + packer sigs)
+    g_security_findings = analyze_security(g_imports, g_sections);
+    // Augment with entropy-based findings
+    for (size_t i = 0; i < g_sections.size(); ++i) {
+        auto bytes = open_binary.get_data(g_sections[i].raw_offset, g_sections[i].raw_size);
+        float ent  = calc_entropy(bytes);
+        if (ent > 7.2f) {
+            bool already = false;
+            for (const auto &f : g_security_findings)
+                if (f.title.find(g_sections[i].name) != std::string::npos) { already = true; break; }
+            if (!already) {
+                security_finding_t sf;
+                sf.category    = "High Entropy";
+                sf.title       = "Section '" + g_sections[i].name + "' entropy " + std::to_string(ent).substr(0,4) + "/8.0";
+                sf.description = "Shannon entropy > 7.2 strongly suggests encrypted, compressed, or packed content.";
+                sf.bypass      = "Run an entropy analysis tool; if packed, OEP-hunt via VirtualProtect bp and dump with Scylla.";
+                sf.severity    = 2;
+                g_security_findings.push_back(std::move(sf));
+            }
+        }
+    }
+
+    g_tls_callbacks  = open_binary.get_tls_callbacks();
+    g_overlay        = open_binary.get_overlay();
+    g_resource_types = open_binary.get_resource_types();
+
+    g_search_results.clear();
+    g_search_done   = false;
+    g_nav_history.clear();
+    g_nav_pos       = -1;
+
     // Auto-disassemble the entry point on load
     size_t ep = open_binary.get_entrypoint();
     if (ep && !g_functions.empty()) {
@@ -158,7 +219,18 @@ static void rebuild_cache() {
     }
 }
 
+static void nav_history_push(uint64_t rva, const std::string &name) {
+    if (g_nav_back_fwd) return;
+    if (g_nav_pos >= 0 && (int)g_nav_history.size() > g_nav_pos + 1)
+        g_nav_history.erase(g_nav_history.begin() + g_nav_pos + 1, g_nav_history.end());
+    if (!g_nav_history.empty() && g_nav_history.back().rva == rva) return;
+    g_nav_history.push_back({rva, name});
+    if ((int)g_nav_history.size() > 50) g_nav_history.erase(g_nav_history.begin());
+    g_nav_pos = (int)g_nav_history.size() - 1;
+}
+
 static void disassemble_function(const function_t &fn) {
+    nav_history_push(fn.rva, fn.name);
     g_current_func_rva = fn.rva;
     uint32_t off = open_binary.rva_to_offset(static_cast<uint32_t>(fn.rva));
     if (!off) return;
@@ -314,6 +386,15 @@ static void render_function_explorer() {
             if (ImGui::MenuItem(xref_label, nullptr, false, nc > 0)) {
                 xrefs_rva  = fn.rva;
                 open_xrefs = true;
+            }
+            bool has_bm = meta::bookmarks.count(fn.rva) > 0;
+            if (ImGui::MenuItem(has_bm ? "Remove Bookmark" : "Add Bookmark")) {
+                if (has_bm) {
+                    meta::bookmarks.erase(fn.rva);
+                } else {
+                    meta::bookmarks[fn.rva] = display_name;
+                }
+                meta::save(open_binary.get_path());
             }
             ImGui::EndPopup();
         }
@@ -550,6 +631,36 @@ static void render_disassembly() {
             }
         }
     }
+
+    // Navigation history buttons
+    bool can_back = (g_nav_pos > 0);
+    bool can_fwd  = (g_nav_pos < (int)g_nav_history.size() - 1);
+    if (!can_back) ImGui::BeginDisabled();
+    if (ImGui::Button("< Back")) {
+        --g_nav_pos;
+        g_nav_back_fwd = true;
+        uint64_t rva = g_nav_history[g_nav_pos].rva;
+        bool found = false;
+        for (int i = 0; i < (int)g_functions.size(); ++i)
+            if (g_functions[i].rva == rva) { g_selected_func = i; disassemble_function(g_functions[i]); found = true; break; }
+        if (!found) { function_t tmp{rva, "loc_" + rva_to_hex(rva), false}; disassemble_function(tmp); }
+        g_nav_back_fwd = false;
+    }
+    if (!can_back) ImGui::EndDisabled();
+    ImGui::SameLine();
+    if (!can_fwd) ImGui::BeginDisabled();
+    if (ImGui::Button("Fwd >")) {
+        ++g_nav_pos;
+        g_nav_back_fwd = true;
+        uint64_t rva = g_nav_history[g_nav_pos].rva;
+        bool found = false;
+        for (int i = 0; i < (int)g_functions.size(); ++i)
+            if (g_functions[i].rva == rva) { g_selected_func = i; disassemble_function(g_functions[i]); found = true; break; }
+        if (!found) { function_t tmp{rva, "loc_" + rva_to_hex(rva), false}; disassemble_function(tmp); }
+        g_nav_back_fwd = false;
+    }
+    if (!can_fwd) ImGui::EndDisabled();
+    ImGui::SameLine();
 
     // Header
     ImGui::TextColored(ImVec4(.5f,.8f,.5f,1.f), "Function @ 0x%08llX",
@@ -951,6 +1062,74 @@ static void render_pe_headers() {
         }
     }
 
+    if (ImGui::CollapsingHeader("Rich Header")) {
+        auto stub = open_binary.get_data(0, (size_t)dos->e_lfanew);
+        auto rich = parse_rich_header(stub.data(), stub.size());
+        if (rich.empty()) {
+            ImGui::TextDisabled("No Rich header found (binary may not be MSVC-compiled).");
+        } else {
+            ImGui::TextDisabled("%zu tool/linker entr%s", rich.size(), rich.size()==1?"y":"ies");
+            if (ImGui::BeginTable("richtbl", 4,
+                    ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+                ImGui::TableSetupColumn("Product ID", ImGuiTableColumnFlags_WidthFixed, 80.f);
+                ImGui::TableSetupColumn("Build ID",   ImGuiTableColumnFlags_WidthFixed, 70.f);
+                ImGui::TableSetupColumn("Count",      ImGuiTableColumnFlags_WidthFixed, 55.f);
+                ImGui::TableSetupColumn("Tool",       ImGuiTableColumnFlags_WidthStretch);
+                ImGui::TableHeadersRow();
+                for (const auto &e : rich) {
+                    ImGui::TableNextRow();
+                    ImGui::TableSetColumnIndex(0); ImGui::Text("0x%04X", e.product_id);
+                    ImGui::TableSetColumnIndex(1); ImGui::Text("%u",      e.build_id);
+                    ImGui::TableSetColumnIndex(2); ImGui::Text("%u",      e.count);
+                    ImGui::TableSetColumnIndex(3); ImGui::TextUnformatted(rich_product_name(e.product_id));
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Product 0x%04X  Build %u  Used %u time(s)\n"
+                                          "Look up exact tool at richprint.com",
+                                          e.product_id, e.build_id, e.count);
+                }
+                ImGui::EndTable();
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("TLS Callbacks")) {
+        if (g_tls_callbacks.empty()) {
+            ImGui::TextDisabled("No TLS directory / no callbacks.");
+        } else {
+            ImGui::TextColored(ImVec4(1.f,.7f,.2f,1.f),
+                               "[!] %zu TLS callback(s) — execute BEFORE the entry point",
+                               g_tls_callbacks.size());
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("TLS callbacks run before AddressOfEntryPoint.\n"
+                                  "Malware uses them for early anti-debug or decryption.");
+            for (uint64_t rva : g_tls_callbacks) {
+                char label[64]; snprintf(label, sizeof(label), "0x%08llX###tls%llX",
+                                         (unsigned long long)rva, (unsigned long long)rva);
+                if (ImGui::Selectable(label)) {
+                    g_nav_disasm_rva = (int64_t)rva;
+                    for (int i = 0; i < (int)g_functions.size(); ++i)
+                        if (g_functions[i].rva == rva) { g_selected_func = i; disassemble_function(g_functions[i]); break; }
+                }
+            }
+        }
+    }
+
+    if (ImGui::CollapsingHeader("PE Overlay")) {
+        if (!g_overlay.size) {
+            ImGui::TextDisabled("No overlay detected.");
+        } else {
+            ImGui::TextColored(ImVec4(1.f,.7f,.2f,1.f),
+                               "[!] Overlay detected: %u bytes at file offset 0x%X",
+                               g_overlay.size, g_overlay.offset);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Data exists after the last section's raw data.\n"
+                                  "May contain encrypted payloads, configuration, "
+                                  "certificates, or installer resources.");
+            if (ImGui::Button("Jump to overlay in Hex View"))
+                g_nav_hex_offset = (int64_t)g_overlay.offset;
+        }
+    }
+
     if (ImGui::CollapsingHeader("Hashes")) {
         if (ImGui::BeginTable("hashtbl", 2,
                 ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
@@ -1219,6 +1398,379 @@ static void render_yara_panel() {
     ImGui::End();
 }
 
+static void render_security_panel() {
+    ImGui::Begin("Security Analysis");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    if (g_security_findings.empty()) {
+        ImGui::TextColored(ImVec4(.4f,.9f,.4f,1.f), "No known protections or anti-debug APIs detected.");
+        ImGui::End(); return;
+    }
+
+    ImGui::TextDisabled("%zu finding(s)", g_security_findings.size());
+    ImGui::Separator();
+    ImGui::BeginChild("##seclist");
+    for (const auto &f : g_security_findings) {
+        ImVec4 col = f.severity >= 3 ? ImVec4(1.f,.3f,.3f,1.f)
+                   : f.severity == 2 ? ImVec4(1.f,.7f,.2f,1.f)
+                   : ImVec4(.7f,.85f,1.f,1.f);
+        ImGui::PushStyleColor(ImGuiCol_Text, col);
+        bool open = ImGui::TreeNodeEx(f.title.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth);
+        ImGui::PopStyleColor();
+        ImGui::SameLine();
+        ImGui::TextDisabled(" [%s]", f.category.c_str());
+        if (open) {
+            ImGui::TextWrapped("%s", f.description.c_str());
+            if (!f.bypass.empty()) {
+                ImGui::Spacing();
+                ImGui::TextColored(ImVec4(.4f,.9f,.9f,1.f), "Bypass:");
+                ImGui::SameLine();
+                ImGui::TextWrapped("%s", f.bypass.c_str());
+            }
+            ImGui::TreePop();
+        }
+    }
+    ImGui::EndChild();
+    ImGui::End();
+}
+
+static void do_byte_search() {
+    g_search_results.clear();
+    g_search_done = false;
+    if (!open_binary.is_open()) return;
+
+    // Parse hex pattern with optional ?? wildcards
+    std::vector<int16_t> pattern;
+    for (const char *p = g_search_pattern; *p; ) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        if (p[0] == '?' && p[1] == '?') {
+            pattern.push_back(-1);
+            p += 2;
+        } else if (isxdigit((unsigned char)p[0]) && isxdigit((unsigned char)p[1])) {
+            char hex[3] = {p[0], p[1], 0};
+            pattern.push_back((int16_t)strtoul(hex, nullptr, 16));
+            p += 2;
+        } else {
+            ++p;
+        }
+    }
+
+    if (pattern.empty()) { g_search_done = true; return; }
+    size_t plen      = pattern.size();
+    size_t file_size = open_binary.get_binary_size();
+    if (file_size < plen) { g_search_done = true; return; }
+
+    const size_t CHUNK = 65536;
+    size_t off = 0;
+    while (off + plen <= file_size && g_search_results.size() < 1000) {
+        size_t chunk = std::min(CHUNK + plen - 1, file_size - off);
+        auto buf = open_binary.get_data(off, chunk);
+        if (buf.empty()) break;
+        for (size_t i = 0; i + plen <= buf.size() && g_search_results.size() < 1000; ++i) {
+            bool match = true;
+            for (size_t j = 0; j < plen; ++j) {
+                if (pattern[j] >= 0 && buf[i + j] != (uint8_t)pattern[j]) { match = false; break; }
+            }
+            if (match) {
+                search_result_t r;
+                r.offset  = (uint32_t)(off + i);
+                size_t cs = (off + i > 4) ? off + i - 4 : 0;
+                r.context = open_binary.get_data(cs, 16);
+                g_search_results.push_back(std::move(r));
+            }
+        }
+        off += CHUNK;
+    }
+    g_search_done = true;
+}
+
+static void render_search_panel() {
+    ImGui::Begin("Search");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    ImGui::SetNextItemWidth(-80.f);
+    ImGui::InputText("##spat", g_search_pattern, sizeof(g_search_pattern));
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Hex bytes with wildcard bytes, e.g.:\n  FF 25 ?? ?? ?? ??\n  48 83 EC ??");
+    ImGui::SameLine();
+    if (ImGui::Button("Search")) do_byte_search();
+
+    if (!g_search_done) {
+        ImGui::TextDisabled("Enter a hex byte pattern and click Search.");
+    } else if (g_search_results.empty()) {
+        ImGui::TextDisabled("No matches found.");
+    } else {
+        ImGui::TextDisabled("%zu match(es)%s", g_search_results.size(),
+                            g_search_results.size() >= 1000 ? " (capped at 1000)" : "");
+        if (ImGui::BeginTable("searchtbl", 2,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+                ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("File Offset", ImGuiTableColumnFlags_WidthFixed, 100.f);
+            ImGui::TableSetupColumn("Context",     ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+            for (const auto &r : g_search_results) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                char row[32]; snprintf(row, sizeof(row), "0x%08X###sr%u", r.offset, r.offset);
+                if (ImGui::Selectable(row, false, ImGuiSelectableFlags_SpanAllColumns))
+                    g_nav_hex_offset = (int64_t)r.offset;
+                ImGui::TableSetColumnIndex(1);
+                std::string hex;
+                for (uint8_t b : r.context) { char tmp[4]; snprintf(tmp,sizeof(tmp),"%02X ",b); hex+=tmp; }
+                ImGui::TextDisabled("%s", hex.c_str());
+            }
+            ImGui::EndTable();
+        }
+    }
+    ImGui::End();
+}
+
+static void render_bookmarks_panel() {
+    ImGui::Begin("Bookmarks");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    if (meta::bookmarks.empty()) {
+        ImGui::TextDisabled("No bookmarks yet.");
+        ImGui::TextDisabled("Right-click a function in the Function Explorer to add one.");
+    } else {
+        ImGui::TextDisabled("%zu bookmark(s)", meta::bookmarks.size());
+        ImGui::Separator();
+        std::vector<uint64_t> to_del;
+        ImGui::BeginChild("##bklist");
+        for (const auto &[rva, label] : meta::bookmarks) {
+            char row[256];
+            snprintf(row, sizeof(row), "0x%08llX  %s###bm%llX",
+                     (unsigned long long)rva, label.c_str(), (unsigned long long)rva);
+            if (ImGui::Selectable(row)) {
+                g_nav_disasm_rva = (int64_t)rva;
+                for (int i = 0; i < (int)g_functions.size(); ++i)
+                    if (g_functions[i].rva == rva) { g_selected_func = i; disassemble_function(g_functions[i]); break; }
+            }
+            if (ImGui::BeginPopupContextItem()) {
+                if (ImGui::MenuItem("Remove")) to_del.push_back(rva);
+                ImGui::EndPopup();
+            }
+        }
+        ImGui::EndChild();
+        for (uint64_t rva : to_del) {
+            meta::bookmarks.erase(rva);
+            meta::save(open_binary.get_path());
+        }
+    }
+    ImGui::End();
+}
+
+static void render_callgraph_panel() {
+    ImGui::Begin("Call Graph");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+    if (g_selected_func < 0 || g_selected_func >= (int)g_functions.size()) {
+        ImGui::TextDisabled("Select a function in the Function Explorer.");
+        ImGui::End(); return;
+    }
+
+    const function_t &fn = g_functions[g_selected_func];
+
+    auto name_of = [](uint64_t rva) -> std::string {
+        auto it = meta::names.find(rva);
+        if (it != meta::names.end()) return it->second;
+        for (const auto &f : g_functions) if (f.rva == rva) return f.name;
+        char tmp[32]; snprintf(tmp, sizeof(tmp), "sub_%llX", (unsigned long long)rva);
+        return tmp;
+    };
+
+    auto nav_to = [](uint64_t rva) {
+        for (int i = 0; i < (int)g_functions.size(); ++i)
+            if (g_functions[i].rva == rva) { g_selected_func = i; disassemble_function(g_functions[i]); return; }
+        function_t tmp{rva, "loc_" + rva_to_hex(rva), false};
+        disassemble_function(tmp);
+    };
+
+    // Callers
+    if (ImGui::CollapsingHeader("Callers", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto it = g_xrefs.find(fn.rva);
+        if (it == g_xrefs.end() || it->second.empty()) {
+            ImGui::TextDisabled("No callers found.");
+        } else {
+            ImGui::BeginChild("##cgcallers", ImVec2(0, 120.f));
+            for (uint64_t ca : it->second) {
+                uint64_t best = 0;
+                for (const auto &f : g_functions) if (f.rva <= ca && f.rva > best) best = f.rva;
+                char row[192];
+                if (best)
+                    snprintf(row, sizeof(row), "0x%08llX  (in %s)###cgcr%llX",
+                             (unsigned long long)ca, name_of(best).c_str(), (unsigned long long)ca);
+                else
+                    snprintf(row, sizeof(row), "0x%08llX###cgcr%llX", (unsigned long long)ca, (unsigned long long)ca);
+                if (ImGui::Selectable(row) && best) nav_to(best);
+            }
+            ImGui::EndChild();
+        }
+    }
+
+    // Current function label
+    ImGui::TextColored(ImVec4(.5f,.8f,1.f,1.f), "► 0x%08llX  %s",
+                       (unsigned long long)fn.rva, name_of(fn.rva).c_str());
+
+    // Callees (from current disassembly)
+    if (ImGui::CollapsingHeader("Callees", ImGuiTreeNodeFlags_DefaultOpen)) {
+        std::unordered_set<uint64_t> seen;
+        std::vector<std::pair<uint64_t,uint64_t>> callees;
+        for (const auto &d : g_disasm)
+            if (d.is_call && d.branch_target && seen.insert(d.branch_target).second)
+                callees.emplace_back(d.address, d.branch_target);
+
+        if (callees.empty()) {
+            ImGui::TextDisabled("No outgoing calls in current disassembly.");
+        } else {
+            ImGui::BeginChild("##cgcallees", ImVec2(0, 120.f));
+            for (const auto &[ca, tgt] : callees) {
+                char row[192];
+                snprintf(row, sizeof(row), "0x%08llX  → %s###cgce%llX",
+                         (unsigned long long)ca, name_of(tgt).c_str(), (unsigned long long)tgt);
+                if (ImGui::Selectable(row)) nav_to(tgt);
+            }
+            ImGui::EndChild();
+        }
+    }
+    ImGui::End();
+}
+
+static void render_resources_panel() {
+    ImGui::Begin("Resources");
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    if (g_resource_types.empty()) {
+        ImGui::TextDisabled("No resource directory found.");
+        ImGui::End(); return;
+    }
+
+    ImGui::TextDisabled("%zu resource type(s)", g_resource_types.size());
+    if (ImGui::BeginTable("restbl", 3,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
+        ImGui::TableSetupScrollFreeze(0, 1);
+        ImGui::TableSetupColumn("Type ID", ImGuiTableColumnFlags_WidthFixed, 70.f);
+        ImGui::TableSetupColumn("Name",    ImGuiTableColumnFlags_WidthFixed, 160.f);
+        ImGui::TableSetupColumn("Count",   ImGuiTableColumnFlags_WidthFixed, 60.f);
+        ImGui::TableHeadersRow();
+        for (const auto &rt : g_resource_types) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            if (rt.id == 0xFFFFu) ImGui::TextDisabled("Named");
+            else ImGui::Text("%u", rt.id);
+            ImGui::TableSetColumnIndex(1); ImGui::TextUnformatted(rt.name.c_str());
+            ImGui::TableSetColumnIndex(2); ImGui::Text("%u", rt.count);
+        }
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
+
+static void export_json() {
+    if (!open_binary.is_open()) return;
+    const std::string &path = open_binary.get_path();
+    std::string out_path    = path + ".bh_report.json";
+
+    FILE *f = fopen(out_path.c_str(), "w");
+    if (!f) { Logger::get()->log("JSON export failed: cannot write " + out_path, "Export"); return; }
+
+    auto esc = [](const std::string &s) -> std::string {
+        std::string o;
+        for (char c : s) {
+            if      (c == '"')  o += "\\\"";
+            else if (c == '\\') o += "\\\\";
+            else if (c == '\n') o += "\\n";
+            else if (c == '\r') o += "\\r";
+            else if (c == '\t') o += "\\t";
+            else if ((unsigned char)c < 0x20) { char t[8]; snprintf(t,sizeof(t),"\\u%04X",(unsigned char)c); o+=t; }
+            else o += c;
+        }
+        return o;
+    };
+
+    fprintf(f, "{\n");
+    fprintf(f, "  \"file\": \"%s\",\n", esc(path).c_str());
+    fprintf(f, "  \"arch\": \"%s\",\n", open_binary.is_64bit() ? "x64" : "x86");
+    fprintf(f, "  \"imphash\": \"%s\",\n", g_imphash.c_str());
+    fprintf(f, "  \"entrypoint\": \"0x%llX\",\n", (unsigned long long)open_binary.get_entrypoint());
+    fprintf(f, "  \"file_size\": %zu,\n", open_binary.get_binary_size());
+    fprintf(f, "  \"has_overlay\": %s,\n", g_overlay.size ? "true" : "false");
+    fprintf(f, "  \"overlay_offset\": \"0x%X\",\n", g_overlay.offset);
+    fprintf(f, "  \"tls_callback_count\": %zu,\n", g_tls_callbacks.size());
+
+    // Sections
+    fprintf(f, "  \"sections\": [\n");
+    for (size_t i = 0; i < g_sections.size(); ++i) {
+        const auto &s = g_sections[i];
+        fprintf(f, "    {\"name\":\"%s\",\"va\":\"0x%X\",\"raw_offset\":\"0x%X\",\"raw_size\":\"0x%X\",\"virt_size\":\"0x%X\"%s}%s\n",
+                esc(s.name).c_str(), s.va, s.raw_offset, s.raw_size, s.virt_size,
+                (i < g_section_hashes.size() && !g_section_hashes[i].empty())
+                    ? (",\"md5\":\"" + g_section_hashes[i] + "\"").c_str() : "",
+                i + 1 < g_sections.size() ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // Imports
+    fprintf(f, "  \"imports\": [\n");
+    for (size_t i = 0; i < g_imports.size(); ++i) {
+        const auto &imp = g_imports[i];
+        fprintf(f, "    {\"dll\":\"%s\",\"function\":\"%s\",\"by_ordinal\":%s}%s\n",
+                esc(imp.dll).c_str(), esc(imp.function).c_str(),
+                imp.by_ordinal ? "true" : "false",
+                i + 1 < g_imports.size() ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // Exports
+    fprintf(f, "  \"exports\": [\n");
+    for (size_t i = 0; i < g_exports.size(); ++i) {
+        const auto &e = g_exports[i];
+        fprintf(f, "    {\"ordinal\":%u,\"rva\":\"0x%X\",\"name\":\"%s\"}%s\n",
+                e.ordinal, e.rva, esc(e.function).c_str(),
+                i + 1 < g_exports.size() ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // Functions
+    fprintf(f, "  \"functions\": [\n");
+    for (size_t i = 0; i < g_functions.size(); ++i) {
+        const auto &fn = g_functions[i];
+        auto nit = meta::names.find(fn.rva);
+        const std::string &nm = (nit != meta::names.end()) ? nit->second : fn.name;
+        auto xr = g_xrefs.find(fn.rva);
+        fprintf(f, "    {\"rva\":\"0x%llX\",\"name\":\"%s\",\"xref_count\":%zu}%s\n",
+                (unsigned long long)fn.rva, esc(nm).c_str(),
+                xr != g_xrefs.end() ? xr->second.size() : 0,
+                i + 1 < g_functions.size() ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // Security findings
+    fprintf(f, "  \"security_findings\": [\n");
+    for (size_t i = 0; i < g_security_findings.size(); ++i) {
+        const auto &sf = g_security_findings[i];
+        fprintf(f, "    {\"category\":\"%s\",\"title\":\"%s\",\"severity\":%d}%s\n",
+                esc(sf.category).c_str(), esc(sf.title).c_str(), sf.severity,
+                i + 1 < g_security_findings.size() ? "," : "");
+    }
+    fprintf(f, "  ],\n");
+
+    // Comments
+    fprintf(f, "  \"comments\": [\n");
+    {
+        size_t idx = 0, total = meta::comments.size();
+        for (const auto &[rva, cmt] : meta::comments)
+            fprintf(f, "    {\"rva\":\"0x%llX\",\"text\":\"%s\"}%s\n",
+                    (unsigned long long)rva, esc(cmt).c_str(), ++idx < total ? "," : "");
+    }
+    fprintf(f, "  ]\n}\n");
+
+    fclose(f);
+    Logger::get()->log("JSON report: " + out_path, "Export");
+}
+
 // ── Frame ─────────────────────────────────────────────────────────────────
 
 bool UI::render_frame() {
@@ -1241,6 +1793,9 @@ bool UI::render_frame() {
         if (ImGui::BeginMenu("File")) {
             if (ImGui::MenuItem("Open", "Ctrl+O"))  open_file_dialog = true;
             ImGui::Separator();
+            if (ImGui::MenuItem("Export JSON Report", nullptr, false, open_binary.is_open()))
+                export_json();
+            ImGui::Separator();
             if (ImGui::MenuItem("Exit", "Alt+F4"))  glfwSetWindowShouldClose(m_window, true);
             ImGui::EndMenu();
         }
@@ -1251,6 +1806,9 @@ bool UI::render_frame() {
             ImGui::MenuItem("Strings");           ImGui::MenuItem("PE Headers");
             ImGui::MenuItem("Pseudo Code");       ImGui::MenuItem("LLVM IR");
             ImGui::MenuItem("YARA");              ImGui::MenuItem("Console");
+            ImGui::MenuItem("Security Analysis"); ImGui::MenuItem("Search");
+            ImGui::MenuItem("Bookmarks");         ImGui::MenuItem("Call Graph");
+            ImGui::MenuItem("Resources");
             ImGui::Separator();
             if (ImGui::MenuItem(g_dark_theme ? "Switch to Light Theme" : "Switch to Dark Theme")) {
                 g_dark_theme    = !g_dark_theme;
@@ -1340,14 +1898,19 @@ bool UI::render_frame() {
         ImGui::DockBuilderDockWindow("Sections",          lb);
         ImGui::DockBuilderDockWindow("Exports",           lb);
         ImGui::DockBuilderDockWindow("Imports",           lb);
+        ImGui::DockBuilderDockWindow("Bookmarks",         lb);
+        ImGui::DockBuilderDockWindow("Resources",         lb);
         ImGui::DockBuilderDockWindow("Disassembly",       rtl);
         ImGui::DockBuilderDockWindow("Pseudo Code",       rtl);
         ImGui::DockBuilderDockWindow("LLVM IR",           rtl);
+        ImGui::DockBuilderDockWindow("Call Graph",        rtl);
         ImGui::DockBuilderDockWindow("Hex View",          rtr);
         ImGui::DockBuilderDockWindow("PE Headers",        rtr);
         ImGui::DockBuilderDockWindow("Strings",           rtr);
         ImGui::DockBuilderDockWindow("Console",           rb);
         ImGui::DockBuilderDockWindow("YARA",              rb);
+        ImGui::DockBuilderDockWindow("Security Analysis", rb);
+        ImGui::DockBuilderDockWindow("Search",            rb);
         ImGui::DockBuilderFinish(ds);
     }
     ImGui::DockSpace(ds);
@@ -1366,6 +1929,11 @@ bool UI::render_frame() {
     render_ir_panel();
     render_yara_panel();
     render_console();
+    render_security_panel();
+    render_search_panel();
+    render_bookmarks_panel();
+    render_callgraph_panel();
+    render_resources_panel();
 
     // ── Flush ─────────────────────────────────────────────────────────────
     ImGui::Render();
