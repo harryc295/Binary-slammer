@@ -20,15 +20,12 @@ jobs:
           - os: windows-latest
             c_compiler: cl
             cpp_compiler: cl
-            extra_cmake_args: ""
           - os: ubuntu-latest
             c_compiler: gcc
             cpp_compiler: g++
-            extra_cmake_args: "-DLLVM_DIR=/usr/lib/llvm-18/cmake"
           - os: ubuntu-latest
             c_compiler: clang
             cpp_compiler: clang++
-            extra_cmake_args: "-DLLVM_DIR=/usr/lib/llvm-18/cmake"
         exclude:
           - os: windows-latest
             c_compiler: gcc
@@ -67,14 +64,26 @@ jobs:
       run: |
         echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
 
-    - name: Configure CMake
+    - name: Configure CMake (Linux)
+      if: runner.os == 'Linux'
       run: >
         cmake -B ${{ steps.strings.outputs.build-output-dir }}
         -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
-        ${{ matrix.extra_cmake_args }}
+        -DLLVM_DIR=/usr/lib/llvm-18/cmake
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        "-DLLVM_DIR=C:/Program Files/LLVM/lib/cmake/llvm"
         -S ${{ github.workspace }}
 
     - name: Build
