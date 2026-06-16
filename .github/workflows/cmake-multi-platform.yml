@@ -55,10 +55,11 @@ jobs:
 
     - name: Install LLVM (Windows)
       if: runner.os == 'Windows'
-      uses: KyleMayes/install-llvm-action@v2
-      with:
-        version: "18"
-        env: true
+      shell: powershell
+      run: |
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe"
+        Start-Process -Wait "$env:TEMP\llvm.exe" -ArgumentList "/S"
+        "LLVM_CMAKE_DIR=C:/Program Files/LLVM/lib/cmake/llvm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
@@ -90,7 +91,7 @@ jobs:
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
-        "-DLLVM_DIR=${{ env.LLVM_PATH }}/lib/cmake/llvm"
+        "-DLLVM_DIR=${{ env.LLVM_CMAKE_DIR }}"
         -S ${{ github.workspace }}
 
     - name: Build
