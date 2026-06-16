@@ -315,6 +315,18 @@ bool UI::create_window() {
     glfwMakeContextCurrent(m_window);
     glfwSwapInterval(1);
 
+    // If the layout version file is missing or stale, wipe imgui.ini so the
+    // dock builder runs fresh (prevents new panels from floating after updates).
+    {
+        static const int k_layout_ver = 3;
+        int stored = 0;
+        if (FILE *vf = fopen("bh_layout.ver", "r")) { fscanf(vf, "%d", &stored); fclose(vf); }
+        if (stored != k_layout_ver) {
+            remove("imgui.ini");
+            if (FILE *vf = fopen("bh_layout.ver", "w")) { fprintf(vf, "%d", k_layout_ver); fclose(vf); }
+        }
+    }
+
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
@@ -1395,11 +1407,11 @@ static void render_console() {
 static void render_yara_panel() {
     ImGui::Begin("YARA");
 #ifndef HAVE_YARA
-    ImGui::TextColored(ImVec4(1.f,.7f,.3f,1.f), "YARA not compiled in.");
+    ImGui::TextDisabled("YARA not enabled.");
     ImGui::Separator();
-    ImGui::TextWrapped("To enable: add \"yara\" to vcpkg.json, then rebuild.");
-    ImGui::TextWrapped("CMakeLists.txt already has optional detection — "
-                       "HAVE_YARA will be defined automatically once the package is found.");
+    ImGui::TextWrapped("To enable: add \"yara\" to vcpkg.json, then rebuild. "
+                       "CMakeLists.txt already has optional detection — "
+                       "HAVE_YARA will be defined automatically when the package is found.");
 #else
     if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
 
@@ -1965,35 +1977,45 @@ bool UI::render_frame() {
         ImGui::DockBuilderAddNode(ds, ImGuiDockNodeFlags_DockSpace);
         ImGui::DockBuilderSetNodeSize(ds, {vp->Size.x, vp->Size.y - menubar_h - toolbar_h});
 
-        ImGuiID left, right;
-        ImGui::DockBuilderSplitNode(ds, ImGuiDir_Left, 0.22f, &left, &right);
+        // ── 4-region layout ───────────────────────────────────────────────
+        //  left (20%)  |  center (56%)  |  side (24%)
+        //              |                               |
+        //              └────────── bottom (25% height) ┘
 
-        ImGuiID lt, lb;
-        ImGui::DockBuilderSplitNode(left, ImGuiDir_Up, 0.55f, &lt, &lb);
+        ImGuiID ds_left, ds_right;
+        ImGui::DockBuilderSplitNode(ds, ImGuiDir_Left, 0.20f, &ds_left, &ds_right);
 
-        ImGuiID rt, rb;
-        ImGui::DockBuilderSplitNode(right, ImGuiDir_Up, 0.70f, &rt, &rb);
+        ImGuiID ds_top, ds_bot;
+        ImGui::DockBuilderSplitNode(ds_right, ImGuiDir_Down, 0.25f, &ds_bot, &ds_top);
 
-        ImGuiID rtl, rtr;
-        ImGui::DockBuilderSplitNode(rt, ImGuiDir_Left, 0.55f, &rtl, &rtr);
+        ImGuiID ds_center, ds_side;
+        ImGui::DockBuilderSplitNode(ds_top, ImGuiDir_Right, 0.30f, &ds_side, &ds_center);
 
-        ImGui::DockBuilderDockWindow("Function Explorer", lt);
-        ImGui::DockBuilderDockWindow("Sections",          lb);
-        ImGui::DockBuilderDockWindow("Exports",           lb);
-        ImGui::DockBuilderDockWindow("Imports",           lb);
-        ImGui::DockBuilderDockWindow("Bookmarks",         lb);
-        ImGui::DockBuilderDockWindow("Resources",         lb);
-        ImGui::DockBuilderDockWindow("Disassembly",       rtl);
-        ImGui::DockBuilderDockWindow("Pseudo Code",       rtl);
-        ImGui::DockBuilderDockWindow("LLVM IR",           rtl);
-        ImGui::DockBuilderDockWindow("Call Graph",        rtl);
-        ImGui::DockBuilderDockWindow("Hex View",          rtr);
-        ImGui::DockBuilderDockWindow("PE Headers",        rtr);
-        ImGui::DockBuilderDockWindow("Strings",           rtr);
-        ImGui::DockBuilderDockWindow("Console",           rb);
-        ImGui::DockBuilderDockWindow("YARA",              rb);
-        ImGui::DockBuilderDockWindow("Security Analysis", rb);
-        ImGui::DockBuilderDockWindow("Search",            rb);
+        // Left — navigator
+        ImGui::DockBuilderDockWindow("Function Explorer", ds_left);
+
+        // Center — primary analysis (Disassembly shown first)
+        ImGui::DockBuilderDockWindow("Hex View",          ds_center);
+        ImGui::DockBuilderDockWindow("Call Graph",        ds_center);
+        ImGui::DockBuilderDockWindow("LLVM IR",           ds_center);
+        ImGui::DockBuilderDockWindow("Pseudo Code",       ds_center);
+        ImGui::DockBuilderDockWindow("Disassembly",       ds_center);
+
+        // Right side — reference data (Strings shown first)
+        ImGui::DockBuilderDockWindow("Bookmarks",         ds_side);
+        ImGui::DockBuilderDockWindow("Resources",         ds_side);
+        ImGui::DockBuilderDockWindow("Sections",          ds_side);
+        ImGui::DockBuilderDockWindow("Exports",           ds_side);
+        ImGui::DockBuilderDockWindow("PE Headers",        ds_side);
+        ImGui::DockBuilderDockWindow("Imports",           ds_side);
+        ImGui::DockBuilderDockWindow("Strings",           ds_side);
+
+        // Bottom — tools and output (Console shown first)
+        ImGui::DockBuilderDockWindow("YARA",              ds_bot);
+        ImGui::DockBuilderDockWindow("Search",            ds_bot);
+        ImGui::DockBuilderDockWindow("Security Analysis", ds_bot);
+        ImGui::DockBuilderDockWindow("Console",           ds_bot);
+
         ImGui::DockBuilderFinish(ds);
     }
     ImGui::DockSpace(ds);
