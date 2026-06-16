@@ -57,6 +57,15 @@ static int                           g_selected_func    = -1;
 static std::unordered_map<uint64_t, std::vector<uint64_t>> g_xrefs;
 static std::string                   g_imphash;
 static std::vector<std::string>      g_section_hashes;
+static std::vector<float>            g_section_entropies; // cached, not recomputed per-frame
+
+// Imports grouped by DLL — cached so we don't rebuild the map every frame
+static std::map<std::string, std::vector<const import_t*>> g_imports_by_dll;
+
+// Pre-filtered string list — rebuilt only when filter changes
+static std::vector<size_t> g_str_filtered_idx;
+static char g_str_filter_cache[128]{};
+static bool g_str_filter_dirty = true;
 static bool g_dark_theme    = true;
 static bool g_theme_changed = false;
 
@@ -159,23 +168,32 @@ static void rebuild_cache() {
     g_selected_func    = -1;
     g_current_func_rva = 0;
 
-    // Per-binary hashes
+    // Per-binary hashes and entropies (computed once, not per-frame)
     g_imphash = open_binary.get_imphash();
     g_section_hashes.resize(g_sections.size());
+    g_section_entropies.resize(g_sections.size(), 0.f);
     for (size_t i = 0; i < g_sections.size(); ++i) {
         auto d = open_binary.get_data(g_sections[i].raw_offset, g_sections[i].raw_size);
-        g_section_hashes[i] = d.empty() ? "" : md5::hash(d.data(), d.size());
+        g_section_hashes[i]   = d.empty() ? "" : md5::hash(d.data(), d.size());
+        g_section_entropies[i] = calc_entropy(d);
     }
+
+    // Group imports by DLL once
+    g_imports_by_dll.clear();
+    for (const auto &imp : g_imports)
+        g_imports_by_dll[imp.dll].push_back(&imp);
+
+    // Mark string filter as needing a rebuild
+    g_str_filter_dirty = true;
 
     build_xrefs();
     meta::load(open_binary.get_path());
 
     // Security analysis (import scan + packer sigs)
     g_security_findings = analyze_security(g_imports, g_sections);
-    // Augment with entropy-based findings
+    // Augment with entropy-based findings (use already-computed g_section_entropies)
     for (size_t i = 0; i < g_sections.size(); ++i) {
-        auto bytes = open_binary.get_data(g_sections[i].raw_offset, g_sections[i].raw_size);
-        float ent  = calc_entropy(bytes);
+        float ent = (i < g_section_entropies.size()) ? g_section_entropies[i] : 0.f;
         if (ent > 7.2f) {
             bool already = false;
             for (const auto &f : g_security_findings)
@@ -477,7 +495,8 @@ static void render_sections() {
         ImGui::TableSetupColumn("Entropy");
         ImGui::TableHeadersRow();
 
-        for (const auto &s : g_sections) {
+        for (size_t si = 0; si < g_sections.size(); ++si) {
+            const auto &s = g_sections[si];
             ImGui::TableNextRow();
             ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(s.name.c_str());
             ImGui::TableSetColumnIndex(1); ImGui::Text("0x%08X", s.va);
@@ -493,12 +512,11 @@ static void render_sections() {
             }
 
             ImGui::TableSetColumnIndex(5);
-            auto bytes = open_binary.get_data(s.raw_offset, s.raw_size);
-            float ent = calc_entropy(bytes);
-            ImVec4 col = ent > 7.0f ? ImVec4(1.f,.2f,.2f,1.f)  // high = suspicious
-                       : ent > 6.0f ? ImVec4(1.f,.7f,.1f,1.f)
-                       : ImVec4(.6f,.9f,.6f,1.f);
-            ImGui::TextColored(col, "%.2f", ent);
+            float ent = (si < g_section_entropies.size()) ? g_section_entropies[si] : 0.f;
+            ImVec4 ecol = ent > 7.0f ? ImVec4(1.f,.2f,.2f,1.f)
+                        : ent > 6.0f ? ImVec4(1.f,.7f,.1f,1.f)
+                        : ImVec4(.6f,.9f,.6f,1.f);
+            ImGui::TextColored(ecol, "%.2f", ent);
             if (ImGui::IsItemHovered())
                 ImGui::SetTooltip("Shannon entropy: %.2f/8.0\n%s",
                                   ent, ent > 7.2f
@@ -565,13 +583,8 @@ static void render_imports() {
     ImGui::TextDisabled("%zu imported functions", g_imports.size());
     ImGui::Separator();
 
-    // Group by DLL
-    std::map<std::string, std::vector<const import_t*>> by_dll;
-    for (const auto &imp : g_imports)
-        by_dll[imp.dll].push_back(&imp);
-
     ImGui::BeginChild("##implist");
-    for (const auto &[dll, funcs] : by_dll) {
+    for (const auto &[dll, funcs] : g_imports_by_dll) {
         bool open = ImGui::TreeNodeEx(dll.c_str(),
                                       ImGuiTreeNodeFlags_DefaultOpen |
                                       ImGuiTreeNodeFlags_SpanFullWidth);
@@ -917,33 +930,52 @@ static void render_strings_panel() {
     ImGui::Begin("Strings");
     if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
 
-    ImGui::TextDisabled("%zu strings found", g_strings.size());
-    ImGui::SameLine();
     static char str_filter[128]{};
     ImGui::SetNextItemWidth(180.f);
-    ImGui::InputText("Filter", str_filter, sizeof(str_filter));
+    bool filter_changed = ImGui::InputText("Filter", str_filter, sizeof(str_filter));
+
+    // Rebuild filtered index only when filter or data changes
+    if (filter_changed || g_str_filter_dirty ||
+        memcmp(str_filter, g_str_filter_cache, sizeof(str_filter)) != 0) {
+        g_str_filtered_idx.clear();
+        g_str_filtered_idx.reserve(g_strings.size());
+        for (size_t i = 0; i < g_strings.size(); ++i) {
+            if (!str_filter[0] || g_strings[i].value.find(str_filter) != std::string::npos)
+                g_str_filtered_idx.push_back(i);
+        }
+        memcpy(g_str_filter_cache, str_filter, sizeof(str_filter));
+        g_str_filter_dirty = false;
+    }
+
+    ImGui::SameLine();
+    ImGui::TextDisabled("%zu / %zu", g_str_filtered_idx.size(), g_strings.size());
 
     if (ImGui::BeginTable("strtable", 3,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupScrollFreeze(0, 1);
-        ImGui::TableSetupColumn("Offset",  ImGuiTableColumnFlags_WidthFixed, 90.f);
-        ImGui::TableSetupColumn("Type",    ImGuiTableColumnFlags_WidthFixed, 50.f);
-        ImGui::TableSetupColumn("Value",   ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Offset", ImGuiTableColumnFlags_WidthFixed, 90.f);
+        ImGui::TableSetupColumn("Type",   ImGuiTableColumnFlags_WidthFixed, 50.f);
+        ImGui::TableSetupColumn("Value",  ImGuiTableColumnFlags_WidthStretch);
         ImGui::TableHeadersRow();
 
-        for (const auto &s : g_strings) {
-            if (str_filter[0] && s.value.find(str_filter) == std::string::npos) continue;
-            ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0); ImGui::Text("0x%08llX", (unsigned long long)s.offset);
-            ImGui::TableSetColumnIndex(1); ImGui::TextDisabled(s.is_unicode ? "UTF16" : "ASCII");
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(s.value.c_str());
-            if (ImGui::IsItemHovered())
-                ImGui::SetTooltip("Double-click to navigate hex view to this offset");
-            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
-                g_nav_hex_offset = static_cast<int64_t>(s.offset);
+        ImGuiListClipper clipper;
+        clipper.Begin(static_cast<int>(g_str_filtered_idx.size()));
+        while (clipper.Step()) {
+            for (int ci = clipper.DisplayStart; ci < clipper.DisplayEnd; ++ci) {
+                const auto &s = g_strings[g_str_filtered_idx[ci]];
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0); ImGui::Text("0x%08llX", (unsigned long long)s.offset);
+                ImGui::TableSetColumnIndex(1); ImGui::TextDisabled(s.is_unicode ? "UTF16" : "ASCII");
+                ImGui::TableSetColumnIndex(2);
+                ImGui::TextUnformatted(s.value.c_str());
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("Double-click to navigate hex view to this offset");
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0))
+                    g_nav_hex_offset = static_cast<int64_t>(s.offset);
+            }
         }
+        clipper.End();
         ImGui::EndTable();
     }
     ImGui::End();
@@ -1860,10 +1892,52 @@ bool UI::render_frame() {
         }
     }
 
-    // ── Dockspace ────────────────────────────────────────────────────────
+    // ── Toolbar ──────────────────────────────────────────────────────────
     ImGuiViewport *vp = ImGui::GetMainViewport();
+    float toolbar_h = ImGui::GetFrameHeightWithSpacing() + 4.f;
     ImGui::SetNextWindowPos({vp->Pos.x, vp->Pos.y + menubar_h});
-    ImGui::SetNextWindowSize({vp->Size.x, vp->Size.y - menubar_h});
+    ImGui::SetNextWindowSize({vp->Size.x, toolbar_h});
+    ImGui::SetNextWindowViewport(vp->ID);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    {6.f, 3.f});
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
+    ImGui::Begin("##Toolbar", nullptr,
+                 ImGuiWindowFlags_NoTitleBar   | ImGuiWindowFlags_NoCollapse |
+                 ImGuiWindowFlags_NoResize     | ImGuiWindowFlags_NoMove     |
+                 ImGuiWindowFlags_NoScrollbar  | ImGuiWindowFlags_NoDocking  |
+                 ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus);
+    ImGui::PopStyleVar(2);
+
+    // Each button focuses (raises to front) the named panel
+    auto panel_btn = [](const char *name) {
+        if (ImGui::SmallButton(name)) ImGui::SetWindowFocus(name);
+        ImGui::SameLine(0, 4.f);
+    };
+
+    panel_btn("Function Explorer");
+    panel_btn("Disassembly");
+    panel_btn("Pseudo Code");
+    panel_btn("LLVM IR");
+    panel_btn("Call Graph");
+    ImGui::SameLine(0, 12.f);
+    panel_btn("Hex View");
+    panel_btn("Strings");
+    panel_btn("Sections");
+    panel_btn("Imports");
+    panel_btn("Exports");
+    panel_btn("PE Headers");
+    panel_btn("Resources");
+    ImGui::SameLine(0, 12.f);
+    panel_btn("Security Analysis");
+    panel_btn("Search");
+    panel_btn("Bookmarks");
+    panel_btn("YARA");
+    panel_btn("Console");
+
+    ImGui::End(); // ##Toolbar
+
+    // ── Dockspace ────────────────────────────────────────────────────────
+    ImGui::SetNextWindowPos({vp->Pos.x, vp->Pos.y + menubar_h + toolbar_h});
+    ImGui::SetNextWindowSize({vp->Size.x, vp->Size.y - menubar_h - toolbar_h});
     ImGui::SetNextWindowViewport(vp->ID);
     ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding,    {0,0});
     ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.f);
@@ -1880,7 +1954,7 @@ bool UI::render_frame() {
     if (!ImGui::DockBuilderGetNode(ds)) {
         ImGui::DockBuilderRemoveNode(ds);
         ImGui::DockBuilderAddNode(ds, ImGuiDockNodeFlags_DockSpace);
-        ImGui::DockBuilderSetNodeSize(ds, {vp->Size.x, vp->Size.y - menubar_h});
+        ImGui::DockBuilderSetNodeSize(ds, {vp->Size.x, vp->Size.y - menubar_h - toolbar_h});
 
         ImGuiID left, right;
         ImGui::DockBuilderSplitNode(ds, ImGuiDir_Left, 0.22f, &left, &right);
