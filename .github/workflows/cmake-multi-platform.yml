@@ -57,9 +57,13 @@ jobs:
       if: runner.os == 'Windows'
       shell: powershell
       run: |
-        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe"
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe" -UseBasicParsing
         Start-Process -Wait "$env:TEMP\llvm.exe" -ArgumentList "/S"
-        "LLVM_CMAKE_DIR=C:/Program Files/LLVM/lib/cmake/llvm" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $cfg) { Write-Error "LLVMConfig.cmake not found after install"; exit 1 }
+        $dir = $cfg.DirectoryName -replace '\\', '/'
+        Write-Host "LLVM cmake dir: $dir"
+        "LLVM_CMAKE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
