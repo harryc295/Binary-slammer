@@ -25,7 +25,9 @@
 #include "../analysis/md5.h"
 #include "../analysis/rich_header.h"
 #include "../analysis/security_analyzer.h"
+#ifdef HAVE_LLVM
 #include "../ir/ir_lifter.h"
+#endif
 #include "file_prompt.h"
 #include "nav_state.h"
 
@@ -40,6 +42,7 @@ static bool     g_binary_changed   = false;
 
 // Forward declarations
 static void disassemble_function(const function_t &fn);
+static float calc_entropy(const std::vector<uint8_t> &data);
 
 // ── Cached analysis data (rebuilt when g_binary_changed) ─────────────────
 static std::vector<section_t>   g_sections;
@@ -49,7 +52,9 @@ static std::vector<string_t>    g_strings;
 static std::vector<function_t>  g_functions;
 static std::vector<disasm_t>         g_disasm;
 static std::vector<pseudo_line_t>    g_pseudo_code;
+#ifdef HAVE_LLVM
 static IRResult                      g_ir_result;
+#endif
 static CFG                           g_cfg;
 static size_t                        g_current_func_rva = 0;
 static int                           g_selected_func    = -1;
@@ -163,7 +168,9 @@ static void rebuild_cache() {
     g_functions = open_binary.get_functions();
     g_disasm.clear();
     g_pseudo_code.clear();
+#ifdef HAVE_LLVM
     g_ir_result = {};
+#endif
     g_cfg       = {};
     g_selected_func    = -1;
     g_current_func_rva = 0;
@@ -269,9 +276,10 @@ static void disassemble_function(const function_t &fn) {
 
     g_pseudo_code = Lifter::lift(g_disasm, open_binary.is_64bit(), call_map);
 
-    // Build CFG and lift to LLVM IR
-    g_cfg       = CFG::build(g_disasm);
+    g_cfg = CFG::build(g_disasm);
+#ifdef HAVE_LLVM
     g_ir_result = IRLifter::lift(g_cfg, open_binary.is_64bit(), fn.name, call_map);
+#endif
 }
 
 // ── Shannon entropy ───────────────────────────────────────────────────────
@@ -1287,6 +1295,12 @@ static void render_ir_panel() {
     ImGui::Begin("LLVM IR");
     if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
 
+#ifndef HAVE_LLVM
+    ImGui::TextDisabled("LLVM not available in this build.");
+    ImGui::TextDisabled("Reinstall LLVM via vcpkg to enable IR lifting.");
+    ImGui::End();
+    return;
+#else
     if (!g_ir_result.valid) {
         if (!g_ir_result.error.empty())
             ImGui::TextColored(ImVec4(1.f,.4f,.4f,1.f), "Lift error: %s", g_ir_result.error.c_str());
@@ -1306,16 +1320,13 @@ static void render_ir_panel() {
 
     const std::string &ir = show_optimized ? g_ir_result.opt_ir : g_ir_result.raw_ir;
 
-    // Split IR into lines and render with syntax colouring
     const ImVec4 col_def    = ImVec4(0.85f, 0.85f, 0.85f, 1.f);
-    const ImVec4 col_kw     = ImVec4(0.56f, 0.74f, 1.0f,  1.f);  // define/br/ret/call
-    const ImVec4 col_label  = ImVec4(0.90f, 0.70f, 0.30f, 1.f);  // bb_XXXXXX:
-    const ImVec4 col_meta   = ImVec4(0.50f, 0.80f, 0.50f, 1.f);  // ; comments / attributes
-    const ImVec4 col_type   = ImVec4(0.70f, 0.90f, 0.70f, 1.f);  // i64 / i32 etc.
+    const ImVec4 col_kw     = ImVec4(0.56f, 0.74f, 1.0f,  1.f);
+    const ImVec4 col_label  = ImVec4(0.90f, 0.70f, 0.30f, 1.f);
+    const ImVec4 col_meta   = ImVec4(0.50f, 0.80f, 0.50f, 1.f);
 
     ImGui::BeginChild("##ir_body", ImVec2(0,0), false, ImGuiWindowFlags_HorizontalScrollbar);
 
-    // Build line list once per IR change
     static std::string cached_ir;
     static std::vector<std::string> cached_lines;
     if (cached_ir != ir) {
@@ -1339,7 +1350,6 @@ static void render_ir_panel() {
 
             ImVec4 col = col_def;
             const char *t = line.c_str();
-            // Skip leading spaces for keyword check
             while (*t == ' ') ++t;
 
             if (*t == ';')
@@ -1351,9 +1361,7 @@ static void render_ir_panel() {
                      strncmp(t, "call ", 5) == 0 || strncmp(t, "unreachable", 11) == 0)
                 col = col_kw;
             else if (line.back() == ':' && line.find(' ') == std::string::npos)
-                col = col_label;  // basic block label
-            else if (strncmp(t, "%", 1) == 0 && line.find(" = ") != std::string::npos)
-                col = col_def;
+                col = col_label;
 
             ImGui::TextColored(col, "%s", line.c_str());
         }
@@ -1361,6 +1369,7 @@ static void render_ir_panel() {
     clipper.End();
     ImGui::EndChild();
     ImGui::End();
+#endif // HAVE_LLVM
 }
 
 static void render_console() {

@@ -281,8 +281,8 @@ typedef struct _IMAGE_RESOURCE_DIRECTORY {
 } IMAGE_RESOURCE_DIRECTORY;
 
 typedef struct _IMAGE_RESOURCE_DIRECTORY_ENTRY {
-    DWORD NameOrId;        // bit 31: 0=ID in low 16 bits, 1=offset to name string
-    DWORD OffsetToData;    // bit 31: 0=data entry, 1=sub-directory offset
+    DWORD Name;         // bit 31: 0=ID in low 16 bits, 1=offset to name string
+    DWORD OffsetToData; // bit 31: 0=data entry, 1=sub-directory offset
 } IMAGE_RESOURCE_DIRECTORY_ENTRY;
 
 typedef struct _IMAGE_RESOURCE_DATA_ENTRY {

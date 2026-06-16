@@ -1,5 +1,7 @@
 #include "ir_lifter.h"
 
+#ifdef HAVE_LLVM
+
 #ifdef _MSC_VER
 #pragma warning(push, 0)
 #endif
@@ -794,3 +796,5 @@ IRResult IRLifter::lift(const CFG &cfg,
     result.valid = true;
     return result;
 }
+
+#endif // HAVE_LLVM

@@ -8,11 +8,15 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 find_package(glfw3 CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Zydis CONFIG REQUIRED)
-find_package(LLVM CONFIG REQUIRED)
+find_package(LLVM CONFIG)
 find_package(unofficial-yara CONFIG QUIET)
-message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} found at ${LLVM_DIR}")
-include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
-add_definitions(${LLVM_DEFINITIONS})
+if(LLVM_FOUND)
+  message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} found at ${LLVM_DIR}")
+  include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+  add_definitions(${LLVM_DEFINITIONS})
+else()
+  message(STATUS "LLVM not found — LLVM IR panel disabled")
+endif()
 
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 
@@ -39,15 +43,18 @@ target_include_directories(app PRIVATE
   ${CMAKE_CURRENT_SOURCE_DIR}/incl
 )
 
-llvm_map_components_to_libnames(llvm_libs
-  core analysis transformutils scalaropts instcombine ipo support passes)
-
 target_link_libraries(app PRIVATE
   OpenGL::GL
   glfw
   Zydis::Zydis
-  ${llvm_libs}
 )
+
+if(LLVM_FOUND)
+  llvm_map_components_to_libnames(llvm_libs
+    core analysis transformutils scalaropts instcombine ipo support passes)
+  target_link_libraries(app PRIVATE ${llvm_libs})
+  target_compile_definitions(app PRIVATE HAVE_LLVM)
+endif()
 
 if(unofficial-yara_FOUND)
   message(STATUS "YARA found — enabling YARA integration")

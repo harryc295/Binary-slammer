@@ -416,9 +416,9 @@ public:
       if (!e) break;
 
       pe_resource_type_t rt{};
-      if (e->NameOrId & 0x80000000u) {
+      if (e->Name & 0x80000000u) {
         // Named resource type — read the Unicode length-prefixed name
-        uint32_t noff = res_off + (e->NameOrId & 0x7FFFFFFFu);
+        uint32_t noff = res_off + (e->Name & 0x7FFFFFFFu);
         const auto *lenp = get_ptr<uint16_t>(noff);
         if (lenp) {
           for (uint16_t j = 0; j < *lenp && j < 64; ++j) {
@@ -429,7 +429,7 @@ public:
         if (rt.name.empty()) rt.name = "(named)";
         rt.id = 0xFFFFu;
       } else {
-        rt.id = (uint16_t)(e->NameOrId & 0xFFFFu);
+        rt.id = (uint16_t)(e->Name & 0xFFFFu);
         const char *known = resource_type_name(rt.id);
         rt.name = known ? known : ("Type " + std::to_string(rt.id));
       }

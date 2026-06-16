@@ -1,6 +1,8 @@
 #ifndef IR_LIFTER_H_
 #define IR_LIFTER_H_
 
+#ifdef HAVE_LLVM
+
 #include <string>
 #include <unordered_map>
 
@@ -8,9 +10,9 @@
 #include "../binary/disassembler.h"
 
 struct IRResult {
-    std::string raw_ir;   // lifted IR before any passes
-    std::string opt_ir;   // IR after optimization passes
-    std::string error;    // non-empty on failure
+    std::string raw_ir;
+    std::string opt_ir;
+    std::string error;
     bool        valid{false};
 };
 
@@ -22,4 +24,5 @@ public:
                          const std::unordered_map<uint64_t, std::string> &call_map);
 };
 
+#endif // HAVE_LLVM
 #endif // IR_LIFTER_H_
