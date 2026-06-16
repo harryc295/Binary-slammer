@@ -4,6 +4,12 @@
   "dependencies": [
     "opengl",
     "glfw3",
-    "zydis"
+    "zydis",
+    {
+      "name": "llvm",
+      "default-features": false,
+      "features": ["enable-rtti"],
+      "platform": "!linux"
+    }
   ]
 }

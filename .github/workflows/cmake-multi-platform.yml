@@ -53,30 +53,23 @@ jobs:
           wayland-protocols \
           llvm-18-dev
 
-    - name: Install and locate LLVM (Windows)
+    - name: Install VC ATL (Windows)
       if: runner.os == 'Windows'
-      shell: powershell
+      shell: pwsh
       run: |
-        Write-Host "=== clang.exe location ==="
-        $clangCmd = Get-Command clang.exe -ErrorAction SilentlyContinue
-        if ($clangCmd) { Write-Host $clangCmd.Source } else { Write-Host "clang.exe not in PATH" }
-        Write-Host "=== C:\Program Files\LLVM (depth 4) ==="
-        if (Test-Path "C:\Program Files\LLVM") {
-          Get-ChildItem "C:\Program Files\LLVM" -Depth 4 | ForEach-Object { Write-Host $_.FullName }
-        } else { Write-Host "Does not exist" }
-        $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $cfg) {
-          Write-Host "=== cmake config not found, running installer ==="
-          Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe" -UseBasicParsing
-          Start-Process -Wait "$env:TEMP\llvm.exe" -ArgumentList "/S"
-          Write-Host "=== After install (depth 4) ==="
-          Get-ChildItem "C:\Program Files\LLVM" -Depth 4 | ForEach-Object { Write-Host $_.FullName }
-          $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-        }
-        if (-not $cfg) { Write-Error "LLVMConfig.cmake not found"; exit 1 }
-        $dir = $cfg.DirectoryName -replace '\\', '/'
-        Write-Host "LLVM_CMAKE_DIR=$dir"
-        "LLVM_CMAKE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+        $vsPath = (& $vswhere -latest -property installationPath).Trim()
+        Write-Host "VS path: $vsPath"
+        $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
+        & $installer modify --installPath "$vsPath" --add "Microsoft.VisualStudio.Component.VC.ATL" --quiet --norestart
+        Write-Host "ATL install done"
+
+    - name: Cache vcpkg packages
+      if: runner.os == 'Windows'
+      uses: actions/cache@v4
+      with:
+        path: ${{ github.workspace }}/build/vcpkg_installed
+        key: vcpkg-windows-llvm-${{ hashFiles('vcpkg.json') }}
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
@@ -108,7 +101,6 @@ jobs:
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
-        "-DLLVM_DIR=${{ env.LLVM_CMAKE_DIR }}"
         -S ${{ github.workspace }}
 
     - name: Build
