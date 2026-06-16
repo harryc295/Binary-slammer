@@ -53,16 +53,28 @@ jobs:
           wayland-protocols \
           llvm-18-dev
 
-    - name: Install LLVM (Windows)
+    - name: Install and locate LLVM (Windows)
       if: runner.os == 'Windows'
       shell: powershell
       run: |
-        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe" -UseBasicParsing
-        Start-Process -Wait "$env:TEMP\llvm.exe" -ArgumentList "/S"
+        Write-Host "=== clang.exe location ==="
+        (Get-Command clang.exe -ErrorAction SilentlyContinue)?.Source
+        Write-Host "=== C:\Program Files\LLVM (depth 4) ==="
+        if (Test-Path "C:\Program Files\LLVM") {
+          Get-ChildItem "C:\Program Files\LLVM" -Depth 4 | ForEach-Object { Write-Host $_.FullName }
+        } else { Write-Host "Does not exist" }
         $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
-        if (-not $cfg) { Write-Error "LLVMConfig.cmake not found after install"; exit 1 }
+        if (-not $cfg) {
+          Write-Host "=== cmake config not found, running installer ==="
+          Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/LLVM-18.1.8-win64.exe" -OutFile "$env:TEMP\llvm.exe" -UseBasicParsing
+          Start-Process -Wait "$env:TEMP\llvm.exe" -ArgumentList "/S"
+          Write-Host "=== After install (depth 4) ==="
+          Get-ChildItem "C:\Program Files\LLVM" -Depth 4 | ForEach-Object { Write-Host $_.FullName }
+          $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+        }
+        if (-not $cfg) { Write-Error "LLVMConfig.cmake not found"; exit 1 }
         $dir = $cfg.DirectoryName -replace '\\', '/'
-        Write-Host "LLVM cmake dir: $dir"
+        Write-Host "LLVM_CMAKE_DIR=$dir"
         "LLVM_CMAKE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
     - name: Setup vcpkg
