@@ -60,11 +60,29 @@ std::string GetFileDialog()
   return "";
 }
 
-#else 
+#else
+
+#include <cstdio>
 
 std::string GetFileDialog()
 {
-  return "/home/array/projects/binaryslammer/testing/win32_64bit_pe.exe";
+  const char *cmds[] = {
+    "zenity --file-selection --title='Open Binary' 2>/dev/null",
+    "kdialog --getopenfilename . '*' 2>/dev/null",
+  };
+  for (const char *cmd : cmds) {
+    FILE *pipe = popen(cmd, "r");
+    if (!pipe) continue;
+    std::string result;
+    char buf[512];
+    while (fgets(buf, sizeof(buf), pipe))
+      result += buf;
+    pclose(pipe);
+    while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+      result.pop_back();
+    if (!result.empty()) return result;
+  }
+  return "";
 }
 
 #endif // !_WIN32

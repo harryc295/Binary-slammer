@@ -9,6 +9,7 @@ find_package(glfw3 CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(Zydis CONFIG REQUIRED)
 find_package(LLVM CONFIG REQUIRED)
+find_package(unofficial-yara CONFIG QUIET)
 message(STATUS "LLVM ${LLVM_PACKAGE_VERSION} found at ${LLVM_DIR}")
 include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 add_definitions(${LLVM_DEFINITIONS})
@@ -47,6 +48,14 @@ target_link_libraries(app PRIVATE
   Zydis::Zydis
   ${llvm_libs}
 )
+
+if(unofficial-yara_FOUND)
+  message(STATUS "YARA found — enabling YARA integration")
+  target_link_libraries(app PRIVATE unofficial::yara::libyara)
+  target_compile_definitions(app PRIVATE HAVE_YARA)
+else()
+  message(STATUS "YARA not found — YARA panel will show enable instructions")
+endif()
 
 if (MSVC)
   target_compile_options(app PRIVATE

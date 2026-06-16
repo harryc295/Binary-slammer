@@ -17,6 +17,8 @@
 #include "../win32_headers.h"
 #endif
 
+#include "../analysis/md5.h"
+
 // ── Data structures ─────────────────────────────────────────────────────────
 
 enum RESOURCE_TYPE : int {
@@ -78,6 +80,7 @@ private:
   LPVOID m_view    = nullptr;
 #endif
   size_t m_file_size{};
+  std::string m_path;
 
   size_t section_table_offset() const {
 #ifdef _WIN32
@@ -96,6 +99,7 @@ public:
   ~Binary() { close(); }
 
   Binary([[maybe_unused]] std::string path) {
+    m_path = path;
 #ifdef _WIN32
     std::wstring wpath(path.begin(), path.end());
 
@@ -158,7 +162,7 @@ public:
 #ifdef _WIN32
         m_file(o.m_file), m_mapping(o.m_mapping), m_view(o.m_view),
 #endif
-        m_file_size(o.m_file_size) {
+        m_file_size(o.m_file_size), m_path(std::move(o.m_path)) {
 #ifdef _WIN32
     o.m_file = INVALID_HANDLE_VALUE;
     o.m_mapping = nullptr;
@@ -176,6 +180,7 @@ public:
       m_view    = o.m_view;    o.m_view    = nullptr;
 #endif
       m_file_size = o.m_file_size; o.m_file_size = 0;
+      m_path = std::move(o.m_path);
     }
     return *this;
   }
@@ -235,6 +240,30 @@ public:
   }
 
   size_t get_binary_size() const { return m_file_size; }
+  const std::string &get_path() const { return m_path; }
+
+  // Compute Import Hash (ImpHash) — MD5 of lowercased dll_stem.func pairs
+  std::string get_imphash() const {
+    auto imps = get_imports();
+    if (imps.empty()) return "";
+    std::string combined;
+    for (const auto &imp : imps) {
+      std::string dll = imp.dll;
+      for (auto &c : dll) c = (char)::tolower((unsigned char)c);
+      auto dot = dll.rfind('.');
+      if (dot != std::string::npos) dll = dll.substr(0, dot);
+      std::string fn;
+      if (imp.by_ordinal) {
+        fn = std::to_string(imp.ordinal);
+      } else {
+        fn = imp.function;
+        for (auto &c : fn) c = (char)::tolower((unsigned char)c);
+      }
+      if (!combined.empty()) combined += ',';
+      combined += dll + '.' + fn;
+    }
+    return md5::hash(combined);
+  }
 
   // ── PE helpers ────────────────────────────────────────────────────────────
 

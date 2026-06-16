@@ -2,21 +2,30 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <ctime>
 #include <map>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "../binary/binary.h"
 #include "../binary/disassembler.h"
 #include "../console_handler.h"
 #include "../data/api_descriptions.h"
+#include "../data/metadata.h"
 #include "../data/section_flags.h"
 #include "../decompiler/lifter.h"
 #include "../analysis/cfg.h"
+#include "../analysis/md5.h"
 #include "../ir/ir_lifter.h"
 #include "file_prompt.h"
 #include "nav_state.h"
+
+#ifdef HAVE_YARA
+#include <yara.h>
+#endif
 
 // Navigation state is defined here (declared extern in nav_state.h)
 int64_t g_nav_hex_offset = -1;
@@ -39,6 +48,74 @@ static CFG                           g_cfg;
 static size_t                        g_current_func_rva = 0;
 static int                           g_selected_func    = -1;
 
+static std::unordered_map<uint64_t, std::vector<uint64_t>> g_xrefs;
+static std::string                   g_imphash;
+static std::vector<std::string>      g_section_hashes;
+static bool g_dark_theme    = true;
+static bool g_theme_changed = false;
+
+#ifdef HAVE_YARA
+struct YaraMatch { std::string rule; std::vector<std::pair<std::string,uint64_t>> hits; };
+static std::vector<YaraMatch> g_yara_matches;
+static std::string            g_yara_error;
+static char                   g_yara_rules_path[512]{};
+static bool                   g_yara_ready = false;
+
+static int yara_scan_cb(YR_SCAN_CONTEXT *ctx, int msg, void *data, void *user) {
+    if (msg == CALLBACK_MSG_RULE_MATCHING) {
+        auto *rule    = static_cast<YR_RULE*>(data);
+        auto *matches = static_cast<std::vector<YaraMatch>*>(user);
+        YaraMatch m; m.rule = rule->identifier;
+        YR_STRING *str; YR_MATCH *match;
+        yr_rule_strings_foreach(rule, str) {
+            yr_string_matches_foreach(ctx, str, match)
+                m.hits.emplace_back(str->identifier, (uint64_t)match->offset);
+        }
+        matches->push_back(std::move(m));
+    }
+    return CALLBACK_CONTINUE;
+}
+
+static void do_yara_scan() {
+    g_yara_matches.clear(); g_yara_error.clear();
+    if (!g_yara_rules_path[0]) { g_yara_error = "No rules file specified."; return; }
+    YR_COMPILER *comp = nullptr;
+    if (yr_compiler_create(&comp) != ERROR_SUCCESS) { g_yara_error = "yr_compiler_create failed"; return; }
+    FILE *f = fopen(g_yara_rules_path, "r");
+    if (!f) { yr_compiler_destroy(comp); g_yara_error = "Cannot open rules file"; return; }
+    if (yr_compiler_add_file(comp, f, nullptr, g_yara_rules_path) > 0) {
+        fclose(f); yr_compiler_destroy(comp); g_yara_error = "Rules compilation failed"; return;
+    }
+    fclose(f);
+    YR_RULES *rules = nullptr;
+    yr_compiler_get_rules(comp, &rules);
+    yr_compiler_destroy(comp);
+    auto data = open_binary.get_data(0, open_binary.get_binary_size());
+    yr_rules_scan_mem(rules, data.data(), data.size(), 0, yara_scan_cb, &g_yara_matches, 0);
+    yr_rules_destroy(rules);
+}
+#endif
+
+static void build_xrefs() {
+    g_xrefs.clear();
+    std::unordered_set<uint64_t> func_rvas;
+    for (const auto &f : g_functions) func_rvas.insert(f.rva);
+
+    for (const auto &sec : g_sections) {
+        if (!(sec.characteristics & IMAGE_SCN_MEM_EXECUTE)) continue;
+        auto bytes = open_binary.get_data(sec.raw_offset, sec.raw_size);
+        for (size_t i = 0; i + 4 < bytes.size(); ++i) {
+            if (bytes[i] == 0xE8) {
+                int32_t rel; memcpy(&rel, &bytes[i+1], 4);
+                uint64_t caller = sec.va + (uint64_t)i;
+                uint64_t target = caller + 5 + (uint64_t)(int64_t)rel;
+                if (func_rvas.count(target))
+                    g_xrefs[target].push_back(caller);
+            }
+        }
+    }
+}
+
 static void rebuild_cache() {
     g_sections  = open_binary.get_sections();
     g_exports   = open_binary.get_exports();
@@ -51,6 +128,17 @@ static void rebuild_cache() {
     g_cfg       = {};
     g_selected_func    = -1;
     g_current_func_rva = 0;
+
+    // Per-binary hashes
+    g_imphash = open_binary.get_imphash();
+    g_section_hashes.resize(g_sections.size());
+    for (size_t i = 0; i < g_sections.size(); ++i) {
+        auto d = open_binary.get_data(g_sections[i].raw_offset, g_sections[i].raw_size);
+        g_section_hashes[i] = d.empty() ? "" : md5::hash(d.data(), d.size());
+    }
+
+    build_xrefs();
+    meta::load(open_binary.get_path());
 
     // Auto-disassemble the entry point on load
     size_t ep = open_binary.get_entrypoint();
@@ -82,10 +170,12 @@ static void disassemble_function(const function_t &fn) {
                                          fn.rva, 512,
                                          open_binary.is_64bit());
 
-    // Build call_map: RVA → name from known functions in this binary
+    // Build call_map: RVA → name (custom name takes priority)
     std::unordered_map<uint64_t, std::string> call_map;
-    for (const auto &f : g_functions)
-        call_map[f.rva] = f.name;
+    for (const auto &f : g_functions) {
+        auto it = meta::names.find(f.rva);
+        call_map[f.rva] = (it != meta::names.end()) ? it->second : f.name;
+    }
 
     g_pseudo_code = Lifter::lift(g_disasm, open_binary.is_64bit(), call_map);
 
@@ -138,10 +228,17 @@ bool UI::create_window() {
 
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
     ImGui_ImplOpenGL3_Init("#version 130");
+
+#ifdef HAVE_YARA
+    yr_initialize();
+#endif
     return true;
 }
 
 void UI::destroy_window() {
+#ifdef HAVE_YARA
+    yr_finalize();
+#endif
     ImGui_ImplOpenGL3_Shutdown();
     ImGui_ImplGlfw_Shutdown();
     ImGui::DestroyContext();
@@ -165,16 +262,34 @@ static void render_function_explorer() {
     static char filter[128]{};
     ImGui::InputText("##fnfilter", filter, sizeof(filter));
 
+    static uint64_t rename_rva   = 0;
+    static char     rename_buf[256]{};
+    static bool     open_rename  = false;
+    static uint64_t xrefs_rva   = 0;
+    static bool     open_xrefs  = false;
+
     ImGui::BeginChild("##fnlist");
     for (int i = 0; i < static_cast<int>(g_functions.size()); ++i) {
         const auto &fn = g_functions[i];
-        if (filter[0] && fn.name.find(filter) == std::string::npos) continue;
+        auto nit = meta::names.find(fn.rva);
+        const std::string &display_name = (nit != meta::names.end()) ? nit->second : fn.name;
 
-        char label[256];
-        snprintf(label, sizeof(label), "0x%08llX  %s%s",
-                 (unsigned long long)fn.rva,
-                 fn.name.c_str(),
-                 fn.from_exports ? " [exp]" : "");
+        if (filter[0] && display_name.find(filter) == std::string::npos
+                      && fn.name.find(filter) == std::string::npos)
+            continue;
+
+        auto xr    = g_xrefs.find(fn.rva);
+        size_t nc  = (xr != g_xrefs.end()) ? xr->second.size() : 0;
+
+        char label[288];
+        if (nc > 0)
+            snprintf(label, sizeof(label), "0x%08llX  %s%s [%zu↑]",
+                     (unsigned long long)fn.rva, display_name.c_str(),
+                     fn.from_exports ? " [exp]" : "", nc);
+        else
+            snprintf(label, sizeof(label), "0x%08llX  %s%s",
+                     (unsigned long long)fn.rva, display_name.c_str(),
+                     fn.from_exports ? " [exp]" : "");
 
         if (ImGui::Selectable(label, g_selected_func == i)) {
             g_selected_func   = i;
@@ -182,9 +297,86 @@ static void render_function_explorer() {
             disassemble_function(fn);
         }
         if (ImGui::IsItemHovered() && fn.from_exports)
-            ImGui::SetTooltip("Named export — click to view disassembly");
+            ImGui::SetTooltip("Named export — right-click for options");
+
+        // Right-click context menu
+        if (ImGui::BeginPopupContextItem()) {
+            ImGui::TextDisabled("0x%08llX  %s", (unsigned long long)fn.rva, display_name.c_str());
+            ImGui::Separator();
+            if (ImGui::MenuItem("Rename...")) {
+                rename_rva = fn.rva;
+                strncpy(rename_buf, display_name.c_str(), sizeof(rename_buf) - 1);
+                rename_buf[sizeof(rename_buf) - 1] = '\0';
+                open_rename = true;
+            }
+            char xref_label[64];
+            snprintf(xref_label, sizeof(xref_label), "Show Callers (%zu)", nc);
+            if (ImGui::MenuItem(xref_label, nullptr, false, nc > 0)) {
+                xrefs_rva  = fn.rva;
+                open_xrefs = true;
+            }
+            ImGui::EndPopup();
+        }
     }
     ImGui::EndChild();
+
+    // ── Rename modal ─────────────────────────────────────────────────────────
+    if (open_rename) { ImGui::OpenPopup("##rename_fn"); open_rename = false; }
+    if (ImGui::BeginPopupModal("##rename_fn", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Rename  0x%08llX", (unsigned long long)rename_rva);
+        ImGui::SetNextItemWidth(320.f);
+        bool enter = ImGui::InputText("##renval", rename_buf, sizeof(rename_buf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::Separator();
+        if (ImGui::Button("OK") || enter) {
+            if (rename_buf[0]) meta::names[rename_rva] = rename_buf;
+            else               meta::names.erase(rename_rva);
+            meta::save(open_binary.get_path());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
+    // ── Xrefs / callers modal ─────────────────────────────────────────────────
+    if (open_xrefs) { ImGui::OpenPopup("##xrefs_fn"); open_xrefs = false; }
+    if (ImGui::BeginPopupModal("##xrefs_fn", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        auto nit2 = meta::names.find(xrefs_rva);
+        const char *xname = (nit2 != meta::names.end()) ? nit2->second.c_str() : "";
+        ImGui::Text("Callers of  0x%08llX  %s", (unsigned long long)xrefs_rva, xname);
+        ImGui::Separator();
+        auto xr = g_xrefs.find(xrefs_rva);
+        if (xr != g_xrefs.end() && !xr->second.empty()) {
+            ImGui::BeginChild("##xreflist", ImVec2(480.f, 280.f));
+            for (uint64_t caller : xr->second) {
+                uint64_t best = 0;
+                const function_t *bf = nullptr;
+                for (const auto &f : g_functions)
+                    if (f.rva <= caller && f.rva > best) { best = f.rva; bf = &f; }
+                auto cit2 = bf ? meta::names.find(bf->rva) : meta::names.end();
+                const char *fn_label = bf ? (cit2 != meta::names.end() ? cit2->second.c_str() : bf->name.c_str()) : "?";
+                char row[160];
+                snprintf(row, sizeof(row), "0x%08llX  (in %s)###xr%llx",
+                         (unsigned long long)caller, fn_label, (unsigned long long)caller);
+                if (ImGui::Selectable(row)) {
+                    g_nav_disasm_rva = (int64_t)caller;
+                    if (bf) {
+                        for (int j = 0; j < (int)g_functions.size(); ++j)
+                            if (g_functions[j].rva == bf->rva) { g_selected_func = j; disassemble_function(g_functions[j]); break; }
+                    }
+                    ImGui::CloseCurrentPopup();
+                }
+            }
+            ImGui::EndChild();
+        } else {
+            ImGui::TextDisabled("No callers found.");
+        }
+        ImGui::Separator();
+        if (ImGui::Button("Close")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     ImGui::End();
 }
 
@@ -366,7 +558,11 @@ static void render_disassembly() {
     ImGui::TextDisabled("  %zu instructions", g_disasm.size());
     ImGui::Separator();
 
-    if (ImGui::BeginTable("disasmtable", 4,
+    static uint64_t pending_comment_rva = 0;
+    static char     comment_buf[256]{};
+    static bool     open_comment_popup  = false;
+
+    if (ImGui::BeginTable("disasmtable", 5,
             ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
             ImGuiTableFlags_ScrollY | ImGuiTableFlags_SizingFixedFit)) {
         ImGui::TableSetupScrollFreeze(0, 1);
@@ -374,6 +570,7 @@ static void render_disassembly() {
         ImGui::TableSetupColumn("Bytes",     ImGuiTableColumnFlags_WidthFixed, 140.f);
         ImGui::TableSetupColumn("Mnemonic",  ImGuiTableColumnFlags_WidthFixed, 80.f);
         ImGui::TableSetupColumn("Operands",  ImGuiTableColumnFlags_WidthStretch);
+        ImGui::TableSetupColumn("Comment",   ImGuiTableColumnFlags_WidthFixed, 200.f);
         ImGui::TableHeadersRow();
 
         size_t ep = open_binary.get_entrypoint();
@@ -432,11 +629,61 @@ static void render_disassembly() {
 
                 if (ImGui::IsItemHovered() && !d.tooltip.empty())
                     ImGui::SetTooltip("%s", d.tooltip.c_str());
+
+                // Comment column
+                ImGui::TableSetColumnIndex(4);
+                {
+                    auto cit = meta::comments.find(d.address);
+                    if (cit != meta::comments.end()) {
+                        ImGui::TextColored(ImVec4(.8f,.8f,.4f,1.f), "; %s", cit->second.c_str());
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetTooltip("Click to edit, right-click to clear");
+                    } else {
+                        ImGui::TextDisabled("+");
+                    }
+                    if (ImGui::IsItemClicked(ImGuiMouseButton_Left)) {
+                        pending_comment_rva = d.address;
+                        auto cit2 = meta::comments.find(d.address);
+                        strncpy(comment_buf, cit2 != meta::comments.end() ? cit2->second.c_str() : "", sizeof(comment_buf)-1);
+                        comment_buf[sizeof(comment_buf)-1] = '\0';
+                        open_comment_popup = true;
+                    }
+                    if (ImGui::IsItemHovered() && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+                        meta::comments.erase(d.address);
+                        meta::save(open_binary.get_path());
+                    }
+                }
             }
         }
         clipper.End();
         ImGui::EndTable();
     }
+
+    // Comment edit modal
+    if (open_comment_popup) { ImGui::OpenPopup("##setcmt"); open_comment_popup = false; }
+    if (ImGui::BeginPopupModal("##setcmt", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::Text("Comment  0x%08llX", (unsigned long long)pending_comment_rva);
+        ImGui::SetNextItemWidth(380.f);
+        bool enter = ImGui::InputText("##cmtval", comment_buf, sizeof(comment_buf),
+                                      ImGuiInputTextFlags_EnterReturnsTrue);
+        ImGui::Separator();
+        if (ImGui::Button("Save") || enter) {
+            if (comment_buf[0]) meta::comments[pending_comment_rva] = comment_buf;
+            else               meta::comments.erase(pending_comment_rva);
+            meta::save(open_binary.get_path());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Clear")) {
+            meta::comments.erase(pending_comment_rva);
+            meta::save(open_binary.get_path());
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) ImGui::CloseCurrentPopup();
+        ImGui::EndPopup();
+    }
+
     ImGui::End();
 }
 
@@ -703,6 +950,43 @@ static void render_pe_headers() {
             ImGui::EndTable();
         }
     }
+
+    if (ImGui::CollapsingHeader("Hashes")) {
+        if (ImGui::BeginTable("hashtbl", 2,
+                ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingFixedFit)) {
+            ImGui::TableSetupColumn("Label",  ImGuiTableColumnFlags_WidthFixed, 130.f);
+            ImGui::TableSetupColumn("MD5",    ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableHeadersRow();
+
+            // ImpHash
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted("ImpHash");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("MD5 of lowercased dll_stem.func pairs (VirusTotal compatible)");
+            ImGui::TableSetColumnIndex(1);
+            if (g_imphash.empty()) ImGui::TextDisabled("N/A");
+            else {
+                ImGui::TextUnformatted(g_imphash.c_str());
+                if (ImGui::IsItemHovered()) ImGui::SetTooltip("Click to copy");
+                if (ImGui::IsItemClicked()) ImGui::SetClipboardText(g_imphash.c_str());
+            }
+
+            // Section MD5s
+            for (size_t i = 0; i < g_sections.size() && i < g_section_hashes.size(); ++i) {
+                ImGui::TableNextRow();
+                ImGui::TableSetColumnIndex(0);
+                char slabel[40]; snprintf(slabel, sizeof(slabel), "%s (MD5)", g_sections[i].name.c_str());
+                ImGui::TextUnformatted(slabel);
+                ImGui::TableSetColumnIndex(1);
+                if (g_section_hashes[i].empty()) ImGui::TextDisabled("empty");
+                else {
+                    ImGui::TextUnformatted(g_section_hashes[i].c_str());
+                    if (ImGui::IsItemClicked()) ImGui::SetClipboardText(g_section_hashes[i].c_str());
+                }
+            }
+            ImGui::EndTable();
+        }
+    }
     ImGui::End();
 }
 
@@ -888,6 +1172,53 @@ static void render_console() {
     ImGui::End();
 }
 
+static void render_yara_panel() {
+    ImGui::Begin("YARA");
+#ifndef HAVE_YARA
+    ImGui::TextColored(ImVec4(1.f,.7f,.3f,1.f), "YARA not compiled in.");
+    ImGui::Separator();
+    ImGui::TextWrapped("To enable: add \"yara\" to vcpkg.json, then rebuild.");
+    ImGui::TextWrapped("CMakeLists.txt already has optional detection — "
+                       "HAVE_YARA will be defined automatically once the package is found.");
+#else
+    if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
+
+    ImGui::SetNextItemWidth(-80.f);
+    ImGui::InputText("##yarpath", g_yara_rules_path, sizeof(g_yara_rules_path));
+    ImGui::SameLine();
+    if (ImGui::Button("Scan")) {
+        do_yara_scan();
+        g_yara_ready = true;
+    }
+
+    if (!g_yara_error.empty())
+        ImGui::TextColored(ImVec4(1.f,.3f,.3f,1.f), "Error: %s", g_yara_error.c_str());
+
+    if (g_yara_ready) {
+        ImGui::Separator();
+        if (g_yara_matches.empty()) {
+            ImGui::TextDisabled("No matches.");
+        } else {
+            ImGui::TextDisabled("%zu rule(s) matched", g_yara_matches.size());
+            ImGui::BeginChild("##yara_results");
+            for (const auto &m : g_yara_matches) {
+                bool open = ImGui::TreeNodeEx(m.rule.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+                if (open) {
+                    for (const auto &[sid, off] : m.hits) {
+                        char row[128];
+                        snprintf(row, sizeof(row), "%s  @ 0x%08llX", sid.c_str(), (unsigned long long)off);
+                        if (ImGui::Selectable(row)) g_nav_hex_offset = (int64_t)off;
+                    }
+                    ImGui::TreePop();
+                }
+            }
+            ImGui::EndChild();
+        }
+    }
+#endif
+    ImGui::End();
+}
+
 // ── Frame ─────────────────────────────────────────────────────────────────
 
 bool UI::render_frame() {
@@ -919,7 +1250,12 @@ bool UI::render_frame() {
             ImGui::MenuItem("Imports");           ImGui::MenuItem("Hex View");
             ImGui::MenuItem("Strings");           ImGui::MenuItem("PE Headers");
             ImGui::MenuItem("Pseudo Code");       ImGui::MenuItem("LLVM IR");
-            ImGui::MenuItem("Console");
+            ImGui::MenuItem("YARA");              ImGui::MenuItem("Console");
+            ImGui::Separator();
+            if (ImGui::MenuItem(g_dark_theme ? "Switch to Light Theme" : "Switch to Dark Theme")) {
+                g_dark_theme    = !g_dark_theme;
+                g_theme_changed = true;
+            }
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
@@ -928,6 +1264,13 @@ bool UI::render_frame() {
         }
         ImGui::EndMainMenuBar();
         menubar_h = ImGui::GetFrameHeight();
+    }
+
+    // Apply theme when toggled
+    if (g_theme_changed) {
+        g_theme_changed = false;
+        if (g_dark_theme) ImGui::StyleColorsDark();
+        else              ImGui::StyleColorsLight();
     }
 
     // ── Welcome popup ────────────────────────────────────────────────────
@@ -1004,6 +1347,7 @@ bool UI::render_frame() {
         ImGui::DockBuilderDockWindow("PE Headers",        rtr);
         ImGui::DockBuilderDockWindow("Strings",           rtr);
         ImGui::DockBuilderDockWindow("Console",           rb);
+        ImGui::DockBuilderDockWindow("YARA",              rb);
         ImGui::DockBuilderFinish(ds);
     }
     ImGui::DockSpace(ds);
@@ -1020,6 +1364,7 @@ bool UI::render_frame() {
     render_pe_headers();
     render_pseudo_code();
     render_ir_panel();
+    render_yara_panel();
     render_console();
 
     // ── Flush ─────────────────────────────────────────────────────────────
@@ -1027,7 +1372,8 @@ bool UI::render_frame() {
     int w, h;
     glfwGetFramebufferSize(m_window, &w, &h);
     glViewport(0, 0, w, h);
-    glClearColor(.08f, .08f, .09f, 1.f);
+    if (g_dark_theme) glClearColor(.08f, .08f, .09f, 1.f);
+    else              glClearColor(.87f, .87f, .87f, 1.f);
     glClear(GL_COLOR_BUFFER_BIT);
     ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
     glfwSwapBuffers(m_window);
