@@ -53,23 +53,36 @@ jobs:
           wayland-protocols \
           llvm-18-dev
 
-    - name: Install VC ATL (Windows)
+    - name: Cache LLVM (Windows)
       if: runner.os == 'Windows'
-      shell: pwsh
-      run: |
-        $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-        $vsPath = (& $vswhere -latest -property installationPath).Trim()
-        Write-Host "VS path: $vsPath"
-        $installer = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vs_installer.exe"
-        & $installer modify --installPath "$vsPath" --add "Microsoft.VisualStudio.Component.VC.ATL" --quiet --norestart
-        Write-Host "ATL install done"
-
-    - name: Cache vcpkg packages
-      if: runner.os == 'Windows'
+      id: cache-llvm
       uses: actions/cache@v4
       with:
-        path: ${{ github.workspace }}/build/vcpkg_installed
-        key: vcpkg-windows-llvm-${{ hashFiles('vcpkg.json') }}
+        path: C:\llvm
+        key: llvm-18.1.8-win-msvc-notools-v1
+
+    - name: Build LLVM from source (Windows)
+      if: runner.os == 'Windows' && steps.cache-llvm.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        Write-Host "Downloading LLVM 18.1.8 source..."
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-18.1.8.src.tar.xz" -OutFile "C:\llvm.tar.xz" -UseBasicParsing
+        tar -xf "C:\llvm.tar.xz" -C "C:\"
+        $srcDir = (Get-ChildItem "C:\" -Directory -Filter "llvm-*" | Select-Object -First 1).FullName
+        Write-Host "Source dir: $srcDir"
+        cmake -B "C:\llvm-bld" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DLLVM_ENABLE_RTTI=ON `
+          -DLLVM_TARGETS_TO_BUILD=X86 `
+          -DLLVM_BUILD_TOOLS=OFF `
+          -DLLVM_INCLUDE_TESTS=OFF `
+          -DLLVM_INCLUDE_EXAMPLES=OFF `
+          -DLLVM_INCLUDE_BENCHMARKS=OFF `
+          -DCMAKE_INSTALL_PREFIX="C:\llvm" `
+          -S $srcDir
+        cmake --build "C:\llvm-bld" --config Release -j8
+        cmake --install "C:\llvm-bld" --config Release
+        Write-Host "LLVM build and install complete"
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
@@ -101,6 +114,7 @@ jobs:
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        -DLLVM_DIR=C:/llvm/lib/cmake/llvm
         -S ${{ github.workspace }}
 
     - name: Build
