@@ -55,7 +55,13 @@ jobs:
 
     - name: Install LLVM (Windows)
       if: runner.os == 'Windows'
-      run: choco install llvm -y
+      shell: powershell
+      run: |
+        choco install llvm -y --no-progress
+        $cfg = Get-ChildItem "C:\Program Files\LLVM" -Recurse -Filter "LLVMConfig.cmake" -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $cfg) { Write-Error "LLVMConfig.cmake not found"; exit 1 }
+        $dir = $cfg.DirectoryName -replace '\\', '/'
+        "LLVM_CMAKE_DIR=$dir" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
@@ -87,7 +93,7 @@ jobs:
         -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
         -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
         -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
-        "-DLLVM_DIR=C:/Program Files/LLVM/lib/cmake/llvm"
+        "-DLLVM_DIR=${{ env.LLVM_CMAKE_DIR }}"
         -S ${{ github.workspace }}
 
     - name: Build
