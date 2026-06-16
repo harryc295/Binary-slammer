@@ -53,6 +53,10 @@ jobs:
           wayland-protocols \
           llvm-18-dev
 
+    - name: Install LLVM (Windows)
+      if: runner.os == 'Windows'
+      run: choco install llvm -y
+
     - name: Setup vcpkg
       uses: lukka/run-vcpkg@v11
       with:
