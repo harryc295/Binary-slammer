@@ -71,6 +71,10 @@ static std::map<std::string, std::vector<const import_t*>> g_imports_by_dll;
 static std::vector<size_t> g_str_filtered_idx;
 static char g_str_filter_cache[128]{};
 static bool g_str_filter_dirty = true;
+
+static std::vector<int> g_fn_filtered_idx;
+static char g_fn_filter_cache[128]{};
+static bool g_fn_filter_dirty = true;
 static bool g_dark_theme    = true;
 static bool g_theme_changed = false;
 
@@ -192,6 +196,7 @@ static void rebuild_cache() {
 
     // Mark string filter as needing a rebuild
     g_str_filter_dirty = true;
+    g_fn_filter_dirty  = true;
 
     build_xrefs();
     meta::load(open_binary.get_path());
@@ -365,12 +370,28 @@ static void render_function_explorer() {
         ImGui::End(); return;
     }
 
-    ImGui::TextDisabled("%zu functions", g_functions.size());
-    ImGui::Separator();
-
     ImGui::SetNextItemWidth(-1.f);
     static char filter[128]{};
     ImGui::InputText("##fnfilter", filter, sizeof(filter));
+
+    // Rebuild filtered index only when filter or names change
+    if (g_fn_filter_dirty || memcmp(filter, g_fn_filter_cache, sizeof(filter)) != 0) {
+        g_fn_filtered_idx.clear();
+        g_fn_filtered_idx.reserve(g_functions.size());
+        for (int i = 0; i < (int)g_functions.size(); ++i) {
+            const auto &fn = g_functions[i];
+            auto nit = meta::names.find(fn.rva);
+            const std::string &dn = (nit != meta::names.end()) ? nit->second : fn.name;
+            if (!filter[0] || dn.find(filter) != std::string::npos
+                           || fn.name.find(filter) != std::string::npos)
+                g_fn_filtered_idx.push_back(i);
+        }
+        memcpy(g_fn_filter_cache, filter, sizeof(filter));
+        g_fn_filter_dirty = false;
+    }
+
+    ImGui::TextDisabled("%zu / %zu", g_fn_filtered_idx.size(), g_functions.size());
+    ImGui::Separator();
 
     static uint64_t rename_rva   = 0;
     static char     rename_buf[256]{};
@@ -379,64 +400,62 @@ static void render_function_explorer() {
     static bool     open_xrefs  = false;
 
     ImGui::BeginChild("##fnlist");
-    for (int i = 0; i < static_cast<int>(g_functions.size()); ++i) {
-        const auto &fn = g_functions[i];
-        auto nit = meta::names.find(fn.rva);
-        const std::string &display_name = (nit != meta::names.end()) ? nit->second : fn.name;
+    ImGuiListClipper clipper;
+    clipper.Begin((int)g_fn_filtered_idx.size());
+    while (clipper.Step()) {
+        for (int ci = clipper.DisplayStart; ci < clipper.DisplayEnd; ++ci) {
+            int i = g_fn_filtered_idx[ci];
+            const auto &fn = g_functions[i];
+            auto nit = meta::names.find(fn.rva);
+            const std::string &display_name = (nit != meta::names.end()) ? nit->second : fn.name;
 
-        if (filter[0] && display_name.find(filter) == std::string::npos
-                      && fn.name.find(filter) == std::string::npos)
-            continue;
+            auto xr   = g_xrefs.find(fn.rva);
+            size_t nc = (xr != g_xrefs.end()) ? xr->second.size() : 0;
 
-        auto xr    = g_xrefs.find(fn.rva);
-        size_t nc  = (xr != g_xrefs.end()) ? xr->second.size() : 0;
+            char label[288];
+            if (nc > 0)
+                snprintf(label, sizeof(label), "0x%08llX  %s%s [%zu↑]",
+                         (unsigned long long)fn.rva, display_name.c_str(),
+                         fn.from_exports ? " [exp]" : "", nc);
+            else
+                snprintf(label, sizeof(label), "0x%08llX  %s%s",
+                         (unsigned long long)fn.rva, display_name.c_str(),
+                         fn.from_exports ? " [exp]" : "");
 
-        char label[288];
-        if (nc > 0)
-            snprintf(label, sizeof(label), "0x%08llX  %s%s [%zu↑]",
-                     (unsigned long long)fn.rva, display_name.c_str(),
-                     fn.from_exports ? " [exp]" : "", nc);
-        else
-            snprintf(label, sizeof(label), "0x%08llX  %s%s",
-                     (unsigned long long)fn.rva, display_name.c_str(),
-                     fn.from_exports ? " [exp]" : "");
-
-        if (ImGui::Selectable(label, g_selected_func == i)) {
-            g_selected_func   = i;
-            g_nav_disasm_rva  = static_cast<int64_t>(fn.rva);
-            disassemble_function(fn);
-        }
-        if (ImGui::IsItemHovered() && fn.from_exports)
-            ImGui::SetTooltip("Named export — right-click for options");
-
-        // Right-click context menu
-        if (ImGui::BeginPopupContextItem()) {
-            ImGui::TextDisabled("0x%08llX  %s", (unsigned long long)fn.rva, display_name.c_str());
-            ImGui::Separator();
-            if (ImGui::MenuItem("Rename...")) {
-                rename_rva = fn.rva;
-                strncpy(rename_buf, display_name.c_str(), sizeof(rename_buf) - 1);
-                rename_buf[sizeof(rename_buf) - 1] = '\0';
-                open_rename = true;
+            if (ImGui::Selectable(label, g_selected_func == i)) {
+                g_selected_func  = i;
+                g_nav_disasm_rva = static_cast<int64_t>(fn.rva);
+                disassemble_function(fn);
             }
-            char xref_label[64];
-            snprintf(xref_label, sizeof(xref_label), "Show Callers (%zu)", nc);
-            if (ImGui::MenuItem(xref_label, nullptr, false, nc > 0)) {
-                xrefs_rva  = fn.rva;
-                open_xrefs = true;
-            }
-            bool has_bm = meta::bookmarks.count(fn.rva) > 0;
-            if (ImGui::MenuItem(has_bm ? "Remove Bookmark" : "Add Bookmark")) {
-                if (has_bm) {
-                    meta::bookmarks.erase(fn.rva);
-                } else {
-                    meta::bookmarks[fn.rva] = display_name;
+            if (ImGui::IsItemHovered() && fn.from_exports)
+                ImGui::SetTooltip("Named export — right-click for options");
+
+            if (ImGui::BeginPopupContextItem()) {
+                ImGui::TextDisabled("0x%08llX  %s", (unsigned long long)fn.rva, display_name.c_str());
+                ImGui::Separator();
+                if (ImGui::MenuItem("Rename...")) {
+                    rename_rva = fn.rva;
+                    strncpy(rename_buf, display_name.c_str(), sizeof(rename_buf) - 1);
+                    rename_buf[sizeof(rename_buf) - 1] = '\0';
+                    open_rename = true;
                 }
-                meta::save(open_binary.get_path());
+                char xref_label[64];
+                snprintf(xref_label, sizeof(xref_label), "Show Callers (%zu)", nc);
+                if (ImGui::MenuItem(xref_label, nullptr, false, nc > 0)) {
+                    xrefs_rva  = fn.rva;
+                    open_xrefs = true;
+                }
+                bool has_bm = meta::bookmarks.count(fn.rva) > 0;
+                if (ImGui::MenuItem(has_bm ? "Remove Bookmark" : "Add Bookmark")) {
+                    if (has_bm) meta::bookmarks.erase(fn.rva);
+                    else        meta::bookmarks[fn.rva] = display_name;
+                    meta::save(open_binary.get_path());
+                }
+                ImGui::EndPopup();
             }
-            ImGui::EndPopup();
         }
     }
+    clipper.End();
     ImGui::EndChild();
 
     // ── Rename modal ─────────────────────────────────────────────────────────
@@ -451,6 +470,7 @@ static void render_function_explorer() {
             if (rename_buf[0]) meta::names[rename_rva] = rename_buf;
             else               meta::names.erase(rename_rva);
             meta::save(open_binary.get_path());
+            g_fn_filter_dirty = true;
             ImGui::CloseCurrentPopup();
         }
         ImGui::SameLine();
@@ -1308,8 +1328,12 @@ static void render_ir_panel() {
     if (!open_binary.is_open()) { ImGui::TextDisabled("No binary loaded."); ImGui::End(); return; }
 
 #ifndef HAVE_LLVM
-    ImGui::TextDisabled("LLVM not available in this build.");
-    ImGui::TextDisabled("Reinstall LLVM via vcpkg to enable IR lifting.");
+    ImGui::TextDisabled("LLVM IR not enabled.");
+    ImGui::Separator();
+    ImGui::TextWrapped("To enable: add \"llvm\" to vcpkg.json dependencies, then rebuild. "
+                       "CMakeLists.txt already has optional detection — "
+                       "HAVE_LLVM will be defined automatically when the package is found. "
+                       "Note: LLVM compiles from source and may take 1-2 hours.");
     ImGui::End();
     return;
 #else
@@ -1396,8 +1420,14 @@ static void render_console() {
     ImGui::Separator();
     ImGui::BeginChild("##consolelog", ImVec2(0,0), false,
                       ImGuiWindowFlags_HorizontalScrollbar);
-    for (const auto &msg : Logger::get()->get_logs())
-        ImGui::Text("[%s]: %s", msg.owner.c_str(), msg.message.c_str());
+    const auto &logs = Logger::get()->get_logs();
+    ImGuiListClipper clilog;
+    clilog.Begin((int)logs.size());
+    while (clilog.Step()) {
+        for (int i = clilog.DisplayStart; i < clilog.DisplayEnd; ++i)
+            ImGui::Text("[%s]: %s", logs[i].owner.c_str(), logs[i].message.c_str());
+    }
+    clilog.End();
     if (ImGui::GetScrollY() >= ImGui::GetScrollMaxY())
         ImGui::SetScrollHereY(1.f);
     ImGui::EndChild();
