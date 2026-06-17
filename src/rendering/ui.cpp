@@ -25,6 +25,9 @@
 #include "../analysis/md5.h"
 #include "../analysis/rich_header.h"
 #include "../analysis/security_analyzer.h"
+#include "../analysis/import_categories.h"
+#include "../analysis/overview.h"
+#include "../analysis/asm_annotate.h"
 #ifdef HAVE_LLVM
 #include "../ir/ir_lifter.h"
 #endif
@@ -75,6 +78,12 @@ static bool g_str_filter_dirty = true;
 static std::vector<int> g_fn_filtered_idx;
 static char g_fn_filter_cache[128]{};
 static bool g_fn_filter_dirty = true;
+
+static overview_t g_overview{};
+static std::map<import_cat_t, std::vector<const import_t*>> g_imports_by_cat;
+static bool g_asm_annotate = false;
+static int  g_sel_section  = -1;
+
 static bool g_dark_theme    = true;
 static bool g_theme_changed = false;
 
@@ -226,6 +235,16 @@ static void rebuild_cache() {
     g_overlay        = open_binary.get_overlay();
     g_resource_types = open_binary.get_resource_types();
 
+    g_imports_by_cat.clear();
+    for (const auto &imp : g_imports)
+        if (!imp.by_ordinal)
+            g_imports_by_cat[classify_import(imp.function)].push_back(&imp);
+
+    g_overview = compute_overview(g_sections, g_imports, g_section_entropies,
+                                  g_security_findings, open_binary.is_64bit(),
+                                  g_overlay.size > 0, g_tls_callbacks);
+    g_sel_section = -1;
+
     g_search_results.clear();
     g_search_done   = false;
     g_nav_history.clear();
@@ -323,7 +342,7 @@ bool UI::create_window() {
     // If the layout version file is missing or stale, wipe imgui.ini so the
     // dock builder runs fresh (prevents new panels from floating after updates).
     {
-        static const int k_layout_ver = 3;
+        static const int k_layout_ver = 4;
         int stored = 0;
         if (FILE *vf = fopen("bh_layout.ver", "r")) { fscanf(vf, "%d", &stored); fclose(vf); }
         if (stored != k_layout_ver) {
@@ -538,7 +557,15 @@ static void render_sections() {
         for (size_t si = 0; si < g_sections.size(); ++si) {
             const auto &s = g_sections[si];
             ImGui::TableNextRow();
-            ImGui::TableSetColumnIndex(0); ImGui::TextUnformatted(s.name.c_str());
+            ImGui::TableSetColumnIndex(0);
+            bool row_sel = (g_sel_section == (int)si);
+            char sel_id[32]; snprintf(sel_id, sizeof(sel_id), "##sr%zu", si);
+            if (ImGui::Selectable(sel_id, row_sel,
+                    ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
+                    ImVec2(0, 0)))
+                g_sel_section = row_sel ? -1 : (int)si;
+            ImGui::SameLine();
+            ImGui::TextUnformatted(s.name.c_str());
             ImGui::TableSetColumnIndex(1); ImGui::Text("0x%08X", s.va);
             ImGui::TableSetColumnIndex(2); ImGui::Text("0x%X", s.virt_size);
             ImGui::TableSetColumnIndex(3); ImGui::Text("0x%X", s.raw_size);
@@ -566,6 +593,60 @@ static void render_sections() {
                                     : "Normal entropy");
         }
         ImGui::EndTable();
+    }
+
+    // Description card for the selected section
+    if (g_sel_section >= 0 && g_sel_section < (int)g_sections.size()) {
+        const auto &s   = g_sections[g_sel_section];
+        float        ent = (g_sel_section < (int)g_section_entropies.size())
+                           ? g_section_entropies[g_sel_section] : 0.f;
+        ImGui::Separator();
+        ImGui::TextColored(ImVec4(.8f,.9f,1.f,1.f), "%s", s.name.c_str());
+        ImGui::Spacing();
+
+        // Purpose description
+        static const struct { const char *name; const char *desc; } k_sec_descs[] = {
+            {".text",    "Executable code — the CPU instructions that make up the program. Normal entropy is ~5.0–6.5."},
+            {".data",    "Initialized global/static variables that the program can read and write at runtime."},
+            {".rdata",   "Read-only data: string constants, import/export tables, vtables. Cannot be written at runtime."},
+            {".bss",     "Uninitialized global variables. Zero-filled by the OS at load time; takes no space on disk."},
+            {".rsrc",    "Resources embedded in the binary: icons, bitmaps, dialogs, version info, manifests."},
+            {".reloc",   "Relocation table — lets the loader fix absolute addresses when the binary loads at a different base."},
+            {".pdata",   "Exception handler data (x64 only). Used by the OS for stack unwinding when exceptions occur."},
+            {".idata",   "Import directory and Import Address Table (IAT) — lists every DLL and function this binary uses."},
+            {".edata",   "Export directory — lists functions this binary exposes so other DLLs or EXEs can call them."},
+            {".tls",     "Thread Local Storage — per-thread data and TLS callbacks that run before the entry point."},
+            {".cfg",     "Control Flow Guard data. A compiler security feature listing valid indirect-call targets."},
+            {".vmp0",    "VMProtect section. Code has been virtualized and is very hard to reverse directly. Use ScyllaHide + OEP finding."},
+            {".vmp1",    "VMProtect section (stage 2). Same approach as .vmp0."},
+            {".vmp2",    "VMProtect section (stage 3)."},
+            {"UPX0",     "UPX packer section. Run 'upx -d <file.exe>' to decompress and recover the original binary."},
+            {"UPX1",     "UPX packer section (decompressed code will land here after unpacking)."},
+            {".themida", "Themida/WinLicense protection section. Use OEP hunting + Scylla dump to bypass."},
+        };
+        const char *purpose = nullptr;
+        for (const auto &d : k_sec_descs)
+            if (s.name == d.name) { purpose = d.desc; break; }
+
+        ImGui::PushTextWrapPos(0.f);
+        if (purpose)
+            ImGui::TextUnformatted(purpose);
+        else
+            ImGui::TextDisabled("No description available for this section name.");
+        ImGui::PopTextWrapPos();
+
+        ImGui::Spacing();
+        // Entropy interpretation
+        const char *ent_label = ent > 7.2f ? "Very high — likely packed or encrypted"
+                              : ent > 6.4f ? "Elevated — may contain compressed data"
+                              : ent > 5.0f ? "Normal for executable code"
+                              : "Low — likely data or padding";
+        ImVec4 ecol = ent > 7.0f ? ImVec4(1.f,.3f,.3f,1.f)
+                    : ent > 6.4f ? ImVec4(1.f,.75f,.2f,1.f)
+                    : ImVec4(.5f,.9f,.5f,1.f);
+        ImGui::TextColored(ecol, "Entropy: %.2f/8.0 — %s", ent, ent_label);
+        ImGui::TextDisabled("Hash: %s", g_sel_section < (int)g_section_hashes.size()
+                            ? g_section_hashes[g_sel_section].c_str() : "");
     }
     ImGui::End();
 }
@@ -623,31 +704,65 @@ static void render_imports() {
     ImGui::TextDisabled("%zu imported functions", g_imports.size());
     ImGui::Separator();
 
+    static int imp_tab = 0;
+    ImGui::RadioButton("By DLL", &imp_tab, 0); ImGui::SameLine();
+    ImGui::RadioButton("By Category", &imp_tab, 1);
+    ImGui::Separator();
+
     ImGui::BeginChild("##implist");
-    for (const auto &[dll, funcs] : g_imports_by_dll) {
-        bool open = ImGui::TreeNodeEx(dll.c_str(),
-                                      ImGuiTreeNodeFlags_DefaultOpen |
-                                      ImGuiTreeNodeFlags_SpanFullWidth);
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("%zu imported functions from %s", funcs.size(), dll.c_str());
-        if (open) {
-            for (const auto *f : funcs) {
-                ImGui::Indent(16.f);
-                if (f->by_ordinal) {
-                    ImGui::TextDisabled("ord#%u", f->ordinal);
-                } else {
+    if (imp_tab == 0) {
+        // ── Original DLL tree ────────────────────────────────────────────
+        for (const auto &[dll, funcs] : g_imports_by_dll) {
+            bool open = ImGui::TreeNodeEx(dll.c_str(),
+                                          ImGuiTreeNodeFlags_DefaultOpen |
+                                          ImGuiTreeNodeFlags_SpanFullWidth);
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%zu imported functions from %s", funcs.size(), dll.c_str());
+            if (open) {
+                for (const auto *f : funcs) {
+                    ImGui::Indent(16.f);
+                    if (f->by_ordinal) {
+                        ImGui::TextDisabled("ord#%u", f->ordinal);
+                    } else {
+                        ImGui::TextUnformatted(f->function.c_str());
+                        if (ImGui::IsItemHovered()) {
+                            const char *tip = get_api_tip(f->function);
+                            if (tip) ImGui::SetTooltip("%s", tip);
+                            else ImGui::SetTooltip("%s (no description available)", f->function.c_str());
+                        }
+                    }
+                    ImGui::Unindent(16.f);
+                }
+                ImGui::TreePop();
+            }
+        }
+    } else {
+        // ── Category view ─────────────────────────────────────────────────
+        for (const auto &ci : k_cat_info) {
+            auto it = g_imports_by_cat.find(ci.cat);
+            if (it == g_imports_by_cat.end() || it->second.empty()) continue;
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(ci.r, ci.g, ci.b, 1.f));
+            bool open = ImGui::TreeNodeEx(ci.label,
+                                          ImGuiTreeNodeFlags_DefaultOpen |
+                                          ImGuiTreeNodeFlags_SpanFullWidth);
+            ImGui::PopStyleColor();
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("%s\n%zu function(s)", ci.description, it->second.size());
+            if (open) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("  %zu", it->second.size());
+                for (const auto *f : it->second) {
+                    ImGui::Indent(16.f);
                     ImGui::TextUnformatted(f->function.c_str());
                     if (ImGui::IsItemHovered()) {
                         const char *tip = get_api_tip(f->function);
-                        if (tip)
-                            ImGui::SetTooltip("%s", tip);
-                        else
-                            ImGui::SetTooltip("%s (no description available)", f->function.c_str());
+                        if (tip) ImGui::SetTooltip("%s\n[from %s]", tip, f->dll.c_str());
+                        else     ImGui::SetTooltip("from %s", f->dll.c_str());
                     }
+                    ImGui::Unindent(16.f);
                 }
-                ImGui::Unindent(16.f);
+                ImGui::TreePop();
             }
-            ImGui::TreePop();
         }
     }
     ImGui::EndChild();
@@ -720,6 +835,10 @@ static void render_disassembly() {
                        (unsigned long long)g_current_func_rva);
     ImGui::SameLine();
     ImGui::TextDisabled("  %zu instructions", g_disasm.size());
+    ImGui::SameLine(0, 20.f);
+    ImGui::Checkbox("Explain", &g_asm_annotate);
+    if (ImGui::IsItemHovered())
+        ImGui::SetTooltip("Show plain-English explanations for each instruction");
     ImGui::Separator();
 
     static uint64_t pending_comment_rva = 0;
@@ -794,12 +913,16 @@ static void render_disassembly() {
                 if (ImGui::IsItemHovered() && !d.tooltip.empty())
                     ImGui::SetTooltip("%s", d.tooltip.c_str());
 
-                // Comment column
+                // Comment column (user comment or auto-annotation)
                 ImGui::TableSetColumnIndex(4);
                 {
                     auto cit = meta::comments.find(d.address);
                     if (cit != meta::comments.end()) {
                         ImGui::TextColored(ImVec4(.8f,.8f,.4f,1.f), "; %s", cit->second.c_str());
+                    } else if (g_asm_annotate) {
+                        std::string ann = annotate_insn(d);
+                        if (!ann.empty())
+                            ImGui::TextColored(ImVec4(.55f,.75f,.55f,1.f), "// %s", ann.c_str());
                         if (ImGui::IsItemHovered())
                             ImGui::SetTooltip("Click to edit, right-click to clear");
                     } else {
@@ -1854,6 +1977,110 @@ static void export_json() {
     Logger::get()->log("JSON report: " + out_path, "Export");
 }
 
+// ── Overview panel ────────────────────────────────────────────────────────
+
+static void render_overview_panel() {
+    ImGui::Begin("Overview");
+    if (!open_binary.is_open()) {
+        ImGui::TextDisabled("No binary loaded.");
+        ImGui::End();
+        return;
+    }
+
+    const auto &ov = g_overview;
+
+    // ── Threat score bar ─────────────────────────────────────────────────
+    ImVec4 score_col;
+    if      (ov.score < 20) score_col = ImVec4(.25f, .85f, .30f, 1.f);
+    else if (ov.score < 45) score_col = ImVec4(.95f, .80f, .10f, 1.f);
+    else if (ov.score < 70) score_col = ImVec4(1.f,  .45f, .10f, 1.f);
+    else                    score_col = ImVec4(1.f,  .15f, .15f, 1.f);
+
+    ImGui::TextUnformatted("Threat Score");
+    ImGui::SameLine();
+    ImGui::TextColored(score_col, "%d / 100  (%s)", ov.score, ov.verdict.c_str());
+
+    float frac = std::clamp(ov.score / 100.f, 0.f, 1.f);
+    ImGui::PushStyleColor(ImGuiCol_PlotHistogram, score_col);
+    ImGui::ProgressBar(frac, ImVec2(-1.f, 10.f), "");
+    ImGui::PopStyleColor();
+
+    ImGui::Spacing();
+
+    // ── Narrative ────────────────────────────────────────────────────────
+    ImGui::SeparatorText("Summary");
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextUnformatted(ov.narrative.c_str());
+    ImGui::PopTextWrapPos();
+
+    ImGui::Spacing();
+
+    // ── Findings ─────────────────────────────────────────────────────────
+    if (!ov.findings.empty()) {
+        ImGui::SeparatorText("Key Findings");
+        for (const auto &f : ov.findings) {
+            ImGui::Bullet();
+            ImGui::SameLine();
+            ImGui::PushTextWrapPos(0.f);
+            ImGui::TextUnformatted(f.c_str());
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Spacing();
+    }
+
+    // ── "Is this normal?" stats table ────────────────────────────────────
+    ImGui::SeparatorText("Is This Normal?");
+    if (ImGui::BeginTable("##ovstats", 4,
+            ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg |
+            ImGuiTableFlags_SizingStretchProp)) {
+        ImGui::TableSetupColumn("Property",     ImGuiTableColumnFlags_WidthStretch, 1.4f);
+        ImGui::TableSetupColumn("Value",        ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Normal Range", ImGuiTableColumnFlags_WidthStretch, 0.8f);
+        ImGui::TableSetupColumn("Note",         ImGuiTableColumnFlags_WidthStretch, 1.8f);
+        ImGui::TableHeadersRow();
+
+        for (const auto &s : ov.stats) {
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::TextUnformatted(s.label.c_str());
+            ImGui::TableSetColumnIndex(1);
+            if (s.ok) ImGui::TextColored(ImVec4(.3f,.9f,.3f,1.f), "%s", s.value.c_str());
+            else      ImGui::TextColored(ImVec4(1.f,.4f,.4f,1.f), "%s", s.value.c_str());
+            ImGui::TableSetColumnIndex(2);
+            ImGui::TextDisabled("%s", s.normal_range.c_str());
+            ImGui::TableSetColumnIndex(3);
+            if (!s.note.empty())
+                ImGui::TextColored(ImVec4(1.f,.75f,.3f,1.f), "%s", s.note.c_str());
+        }
+        ImGui::EndTable();
+    }
+
+    ImGui::Spacing();
+
+    // ── Behaviour category badges ─────────────────────────────────────────
+    ImGui::SeparatorText("Import Behaviour Categories");
+    bool any = false;
+    for (const auto &ci : k_cat_info) {
+        auto it = ov.cat_counts.find(ci.cat);
+        if (it == ov.cat_counts.end() || it->second == 0) continue;
+        any = true;
+        ImGui::PushStyleColor(ImGuiCol_Button,        ImVec4(ci.r*.5f, ci.g*.5f, ci.b*.5f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(ci.r*.7f, ci.g*.7f, ci.b*.7f, 1.f));
+        ImGui::PushStyleColor(ImGuiCol_ButtonActive,  ImVec4(ci.r,     ci.g,     ci.b,     1.f));
+        char lbl[64];
+        snprintf(lbl, sizeof(lbl), "%s  %d##ovbadge%d", ci.label, it->second, (int)ci.cat);
+        ImGui::SmallButton(lbl);
+        ImGui::PopStyleColor(3);
+        if (ImGui::IsItemHovered())
+            ImGui::SetTooltip("%s", ci.description);
+        ImGui::SameLine(0, 6.f);
+    }
+    if (any) ImGui::NewLine();
+    else     ImGui::TextDisabled("No categorised imports.");
+
+    ImGui::End();
+}
+
 // ── Frame ─────────────────────────────────────────────────────────────────
 
 bool UI::render_frame() {
@@ -1983,6 +2210,7 @@ bool UI::render_frame() {
     panel_btn("Bookmarks");
     panel_btn("YARA");
     panel_btn("Console");
+    panel_btn("Overview");
 
     ImGui::End(); // ##Toolbar
 
@@ -2039,6 +2267,7 @@ bool UI::render_frame() {
         ImGui::DockBuilderDockWindow("PE Headers",        ds_side);
         ImGui::DockBuilderDockWindow("Imports",           ds_side);
         ImGui::DockBuilderDockWindow("Strings",           ds_side);
+        ImGui::DockBuilderDockWindow("Overview",          ds_side);
 
         // Bottom — tools and output (Console shown first)
         ImGui::DockBuilderDockWindow("YARA",              ds_bot);
@@ -2069,6 +2298,7 @@ bool UI::render_frame() {
     render_bookmarks_panel();
     render_callgraph_panel();
     render_resources_panel();
+    render_overview_panel();
 
     // ── Flush ─────────────────────────────────────────────────────────────
     ImGui::Render();
