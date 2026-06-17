@@ -178,7 +178,8 @@ inline overview_t compute_overview(
     }
 
     // ── Import cluster: network + persistence (C2 dropper) ───────────────────
-    {
+    // Only flag when no packer detected — installers legitimately combine these
+    if (packer_count == 0) {
         bool net     = has_import_prefix("InternetOpen")  || has_import("WSAStartup")
                     || has_import_prefix("WinHttpOpen")   || has_import("URLDownloadToFile");
         bool persist = has_import_prefix("RegCreateKey")  || has_import_prefix("RegSetValueEx")
@@ -208,12 +209,17 @@ inline overview_t compute_overview(
     }
 
     // ── Single anti-debug APIs (if not already caught by cluster) ─────────────
+    // Halved when packer detected: timing APIs inside NSIS/Inno are routine, not evasion
     if (antidebug_count > 0) {
-        score += std::min(30, antidebug_count * 10);
+        int ad_score = (packer_count > 0)
+            ? std::min(12, antidebug_count * 4)
+            : std::min(30, antidebug_count * 10);
+        score += ad_score;
         char buf[128];
         std::snprintf(buf, sizeof(buf),
-            "%d anti-debug API(s) imported -- binary actively resists analysis",
-            antidebug_count);
+            "%d anti-debug API(s) detected%s",
+            antidebug_count,
+            packer_count > 0 ? " (inside packer -- may be installer timing code)" : " -- binary actively resists analysis");
         if (out.findings.size() < 10) out.findings.push_back(buf);
     }
 
