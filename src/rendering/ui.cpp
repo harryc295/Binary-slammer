@@ -242,7 +242,8 @@ static void rebuild_cache() {
 
     g_overview = compute_overview(g_sections, g_imports, g_section_entropies,
                                   g_security_findings, open_binary.is_64bit(),
-                                  g_overlay.size > 0, g_tls_callbacks);
+                                  g_overlay.size > 0, g_tls_callbacks,
+                                  g_strings, g_resource_types);
     g_sel_section = -1;
 
     g_search_results.clear();

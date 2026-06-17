@@ -70,7 +70,7 @@ static const struct { const char *prefix; import_cat_t cat; } k_import_sigs[] = 
     {"RemoveDirectory",          import_cat_t::FileIO},
     {"SetCurrentDirectory",      import_cat_t::FileIO},
     {"GetCurrentDirectory",      import_cat_t::FileIO},
-    // Process Injection
+    // Process Injection (actual cross-process manipulation APIs only)
     {"VirtualAllocEx",           import_cat_t::ProcessInjection},
     {"WriteProcessMemory",       import_cat_t::ProcessInjection},
     {"ReadProcessMemory",        import_cat_t::ProcessInjection},
@@ -79,8 +79,6 @@ static const struct { const char *prefix; import_cat_t cat; } k_import_sigs[] = 
     {"ZwUnmapViewOfSection",     import_cat_t::ProcessInjection},
     {"QueueUserAPC",             import_cat_t::ProcessInjection},
     {"NtQueueApcThread",         import_cat_t::ProcessInjection},
-    {"LoadLibrary",              import_cat_t::ProcessInjection},
-    {"GetProcAddress",           import_cat_t::ProcessInjection},
     // Anti-Analysis
     {"IsDebuggerPresent",        import_cat_t::AntiAnalysis},
     {"CheckRemoteDebugger",      import_cat_t::AntiAnalysis},
