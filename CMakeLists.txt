@@ -28,6 +28,7 @@ if(WIN32)
 endif()
 
 add_executable(app)
+set_target_properties(app PROPERTIES OUTPUT_NAME "binaryslammer")
 
 file(GLOB_RECURSE app_SOURCES
   "src/*.cpp"

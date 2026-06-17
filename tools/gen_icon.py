@@ -1,173 +1,228 @@
 #!/usr/bin/env python3
-"""Generate BinaryHammer assets/icon.ico and src/rendering/app_icon.h"""
-import struct, os
+"""
+Generate BinaryHammer assets/icon.ico and src/rendering/app_icon.h
+Design: diagonal metallic hammer — steel head, amber wood handle, spark accents.
+"""
+import struct, os, math
 
-# Palette
-BG    = (12,  14,  22,  255)   # dark navy
-MAIN  = (220, 90,  40,  255)   # orange
-HIGH  = (255, 145, 75,  255)   # highlight
-SHADE = (130, 48,  15,  255)   # shadow
-DARK  = (8,   9,   15,  255)   # very dark edge
-
-
-def make_grid(size):
-    return [list(BG)] * (size * size)
+def clamp(v): return max(0, min(255, int(v)))
+def lerp(a, b, t): return clamp(a + (b - a) * t)
+def lerp3(c0, c1, t): return (lerp(c0[0],c1[0],t), lerp(c0[1],c1[1],t), lerp(c0[2],c1[2],t))
 
 
-def sp(px, size, x, y, c):
-    if 0 <= x < size and 0 <= y < size:
-        px[y * size + x] = list(c)
+def make_pixels(size):
+    W = H = size
+    sc = size / 32.0
+    pix = [[0, 0, 0, 0] for _ in range(W * H)]
 
+    def put(x, y, r, g, b, a=255):
+        xi, yi = int(x), int(y)
+        if 0 <= xi < W and 0 <= yi < H:
+            pix[yi * W + xi] = [clamp(r), clamp(g), clamp(b), clamp(a)]
 
-def rect(px, size, x, y, w, h, c):
-    for dy in range(h):
-        for dx in range(w):
-            sp(px, size, x + dx, y + dy, c)
+    def blend(x, y, r, g, b, a=255):
+        xi, yi = int(x), int(y)
+        if 0 <= xi < W and 0 <= yi < H:
+            d = pix[yi * W + xi]
+            t = a / 255.0
+            pix[yi * W + xi] = [
+                clamp(d[0]*(1-t) + r*t),
+                clamp(d[1]*(1-t) + g*t),
+                clamp(d[2]*(1-t) + b*t),
+                max(d[3], clamp(a))
+            ]
 
+    def local(px, py, cx, cy, angle_deg):
+        a = math.radians(-angle_deg)
+        dx = px - cx; dy = py - cy
+        return dx*math.cos(a) - dy*math.sin(a), dx*math.sin(a) + dy*math.cos(a)
 
-def draw_32():
-    """32x32 hammer icon."""
-    s = 32
-    px = make_grid(s)
+    def in_rect(lx, ly, w, h):
+        return abs(lx) <= w/2 and abs(ly) <= h/2
+
+    # ── Background: dark rounded square ───────────────────────────────────
+    BG  = (18, 20, 28)
+    BG2 = (26, 30, 44)
+    cr   = 5.0 * sc
+    half = size / 2.0
+    for y in range(H):
+        for x in range(W):
+            ex = max(abs(x + 0.5 - half) - (half - cr), 0.0)
+            ey = max(abs(y + 0.5 - half) - (half - cr), 0.0)
+            if ex*ex + ey*ey <= cr*cr:
+                t = (x + y) / (2.0 * size)
+                c = lerp3(BG, BG2, t)
+                put(x, y, *c, 255)
+
+    # Head: long axis NE-SW (angle=-45°), wide-and-flat
+    # Handle: long axis SE-NW (angle=+45°), connects from head center down-right
+    HEAD_ANG   = -45.0
+    HANDLE_ANG = +45.0
+
+    # All coords in 32-space, scaled by sc
+    HEAD_CX, HEAD_CY = 11.0*sc, 11.0*sc
+    HEAD_W,  HEAD_H  = 18.0*sc,  9.0*sc
+
+    HAND_CX, HAND_CY = 20.0*sc, 20.0*sc
+    HAND_W,  HAND_H  = 20.0*sc,  5.0*sc   # W = length, H = thickness
+
+    # Metallic steel colours
+    STEEL_DARK   = (50,  56,  68)
+    STEEL_MID    = (95, 108, 126)
+    STEEL_LIGHT  = (158, 176, 198)
+    STEEL_BRIGHT = (214, 230, 248)
+    STEEL_WHITE  = (240, 250, 255)
+
+    # Amber wood colours
+    WOOD_BRIGHT = (225, 130, 32)
+    WOOD_MID    = (175,  85, 15)
+    WOOD_DARK   = (105,  48,  7)
+
+    # ── Handle (drawn first — head overlaps) ─────────────────────────────
+    for y in range(H):
+        for x in range(W):
+            lx, ly = local(x+0.5, y+0.5, HAND_CX, HAND_CY, HANDLE_ANG)
+            if in_rect(lx, ly, HAND_W, HAND_H):
+                tx = lx / (HAND_W / 2)   # -1=neck, +1=butt
+                ty = ly / (HAND_H / 2)   # -1=upper, +1=lower
+
+                # Cylindrical wood: bright upper side, dark lower
+                side = (ty + 1) / 2.0
+                if side < 0.3:
+                    c = lerp3(WOOD_BRIGHT, WOOD_MID, side / 0.3)
+                elif side < 0.7:
+                    c = lerp3(WOOD_MID, WOOD_DARK, (side - 0.3) / 0.4)
+                else:
+                    c = WOOD_DARK
+
+                # Darken at neck (near head)
+                neck = max(0.0, (-tx - 0.4) / 0.6) * 0.5
+                put(x, y, clamp(c[0]*(1-neck)), clamp(c[1]*(1-neck)), clamp(c[2]*(1-neck)), 255)
 
     # ── Hammer head ───────────────────────────────────────────────────────
-    # Main body: cols 3-19 (17 wide), rows 5-11 (7 tall)
-    rect(px, s, 3, 5, 17, 7, MAIN)
+    for y in range(H):
+        for x in range(W):
+            lx, ly = local(x+0.5, y+0.5, HEAD_CX, HEAD_CY, HEAD_ANG)
+            if in_rect(lx, ly, HEAD_W, HEAD_H):
+                tx = lx / (HEAD_W / 2)   # -1=face (SW), +1=poll (NE)
+                ty = ly / (HEAD_H / 2)   # -1=upper (NW), +1=lower (SE)
 
-    # Highlight – top edge + left face
-    rect(px, s, 3, 5, 17, 1, HIGH)  # top strip
-    rect(px, s, 3, 5,  3, 7, HIGH)  # left face strip
+                # Lighting: face edge bright, top face bright, back-bottom dark
+                face_t = max(0.0, -tx) * 0.65
+                top_t  = max(0.0, -ty - 0.1) * 0.55
+                total  = min(1.0, face_t + top_t)
+                shadow = max(0.0, tx * 0.45 + ty * 0.3) * 0.55
 
-    # Shadow – bottom edge + right edge
-    rect(px, s, 3, 11, 17, 1, SHADE)   # bottom strip
-    rect(px, s, 19, 5,  1,  7, SHADE)  # right edge
+                if total > 0.82:
+                    c = lerp3(STEEL_BRIGHT, STEEL_WHITE, (total - 0.82) / 0.18)
+                elif total > 0.55:
+                    c = lerp3(STEEL_LIGHT, STEEL_BRIGHT, (total - 0.55) / 0.27)
+                elif total > 0.28:
+                    c = lerp3(STEEL_MID, STEEL_LIGHT, (total - 0.28) / 0.27)
+                else:
+                    c = lerp3(STEEL_DARK, STEEL_MID, total / 0.28)
 
-    # 1-pixel dark outline along very top + left
-    for x in range(2, 21):
-        sp(px, s, x, 4, DARK)
-    for y in range(4, 13):
-        sp(px, s, 2, y, DARK)
+                put(x, y,
+                    clamp(c[0]*(1-shadow)),
+                    clamp(c[1]*(1-shadow)),
+                    clamp(c[2]*(1-shadow)), 255)
 
-    # ── Handle ────────────────────────────────────────────────────────────
-    # cols 12-15 (4 wide), rows 12-25 (14 tall)
-    rect(px, s, 12, 12, 4, 14, MAIN)
+    # ── Bright glint along head's NW face (top edge) ──────────────────────
+    for y in range(H):
+        for x in range(W):
+            lx, ly = local(x+0.5, y+0.5, HEAD_CX, HEAD_CY, HEAD_ANG)
+            if in_rect(lx, ly, HEAD_W, HEAD_H):
+                ty = ly / (HEAD_H / 2)
+                if ty < -0.80:
+                    blend(x, y, 245, 252, 255, 180)
 
-    # Left highlight, right shadow
-    rect(px, s, 12, 12, 1, 14, HIGH)
-    rect(px, s, 15, 12, 1, 14, SHADE)
+    # ── Bright edge on striking face ──────────────────────────────────────
+    for y in range(H):
+        for x in range(W):
+            lx, ly = local(x+0.5, y+0.5, HEAD_CX, HEAD_CY, HEAD_ANG)
+            if in_rect(lx, ly, HEAD_W, HEAD_H):
+                tx = lx / (HEAD_W / 2)
+                if tx < -0.87:
+                    blend(x, y, 248, 254, 255, 200)
 
-    # Bottom cap
-    rect(px, s, 12, 25, 4, 1, SHADE)
+    # ── Orange ferrule (collar where handle meets head) ───────────────────
+    # Place it at the handle's neck end, just outside the head's lower edge
+    FERR_CX = 14.5 * sc
+    FERR_CY = 14.5 * sc
+    FERR_W  =  6.5 * sc
+    FERR_H  =  3.0 * sc
+    for y in range(H):
+        for x in range(W):
+            lx, ly = local(x+0.5, y+0.5, FERR_CX, FERR_CY, HANDLE_ANG)
+            if in_rect(lx, ly, FERR_W, FERR_H):
+                # Only draw if NOT inside head body (avoids painting over steel)
+                hlx, hly = local(x+0.5, y+0.5, HEAD_CX, HEAD_CY, HEAD_ANG)
+                if not in_rect(hlx, hly, HEAD_W * 0.95, HEAD_H * 0.95):
+                    blend(x, y, 200, 105, 18, 210)
 
-    # Dark outline around handle left + bottom
-    for y in range(11, 27):
-        sp(px, s, 11, y, DARK)
-    for x in range(11, 17):
-        sp(px, s, x, 26, DARK)
+    # ── Orange + yellow sparks at striking face ───────────────────────────
+    # Face centre in screen space (32-scale) ≈ (4.6, 17.4); shift a bit out
+    fx = int(2.8 * sc)
+    fy = int(18.5 * sc)
+    sparks = [
+        ( 0,  0, 255, 185,  20, 230),
+        (-1,  1, 255, 145,   5, 190),
+        ( 1, -1, 255, 215,  55, 175),
+        (-1, -1, 255, 160,  10, 160),
+        ( 0, -2, 255, 238,  95, 155),
+        ( 2,  1, 230, 115,  10, 140),
+        (-2,  0, 255, 200,  40, 130),
+    ]
+    spread = max(1, int(sc * 0.9))
+    for sdx, sdy, sr, sg, sb, sa in sparks:
+        blend(fx + sdx*spread, fy + sdy*spread, sr, sg, sb, sa)
 
-    return px
-
-
-def draw_16():
-    """16x16 hammer icon (simplified)."""
-    s = 16
-    px = make_grid(s)
-
-    # Head: cols 1-10 (10w), rows 2-6 (5h)
-    rect(px, s, 1, 2, 10, 5, MAIN)
-    rect(px, s, 1, 2, 10, 1, HIGH)   # top highlight
-    rect(px, s, 1, 2,  2, 5, HIGH)   # left face
-    rect(px, s, 1, 6, 10, 1, SHADE)  # bottom shadow
-    rect(px, s,10, 2,  1, 5, SHADE)  # right shadow
-
-    # Handle: cols 6-8 (3w), rows 7-13 (7h)
-    rect(px, s, 6, 7, 3, 7, MAIN)
-    rect(px, s, 6, 7, 1, 7, HIGH)
-    rect(px, s, 8, 7, 1, 7, SHADE)
-    rect(px, s, 6,13, 3, 1, SHADE)
-
-    return px
-
-
-def draw_48():
-    """48x48 hammer icon (scaled-up version)."""
-    s = 48
-    px = make_grid(s)
-
-    # Head: cols 4-29 (26w), rows 7-17 (11h)
-    rect(px, s,  4,  7, 26, 11, MAIN)
-    rect(px, s,  4,  7, 26,  2, HIGH)
-    rect(px, s,  4,  7,  5, 11, HIGH)
-    rect(px, s,  4, 17, 26,  1, SHADE)
-    rect(px, s, 29,  7,  1, 11, SHADE)
-
-    for x in range(3, 31): sp(px, s, x,  6, DARK)
-    for y in range(6, 19): sp(px, s,  3, y, DARK)
-
-    # Handle: cols 18-23 (6w), rows 18-37 (20h)
-    rect(px, s, 18, 18, 6, 20, MAIN)
-    rect(px, s, 18, 18, 1, 20, HIGH)
-    rect(px, s, 23, 18, 1, 20, SHADE)
-    rect(px, s, 18, 37, 6,  1, SHADE)
-
-    for y in range(17, 40): sp(px, s, 17, y, DARK)
-    for x in range(17, 25): sp(px, s,  x, 39, DARK)
-
-    return px
+    return pix
 
 
-def flatten(px):
-    return bytes(sum(px, []))
+def flatten(pix):
+    return bytes(sum(pix, []))
 
 
 def make_bmp_blob(w, h, rgba):
-    """ICO-compatible BMP blob (32-bit BGRA, bottom-up, with AND mask)."""
-    header = struct.pack('<IiiHHIIiiII',
-        40, w, h * 2, 1, 32, 0, w * h * 4, 0, 0, 0, 0)
-
+    header = struct.pack('<IiiHHIIiiII', 40, w, h*2, 1, 32, 0, w*h*4, 0, 0, 0, 0)
     bgra = bytearray()
-    for row in range(h - 1, -1, -1):
+    for row in range(h-1, -1, -1):
         for col in range(w):
-            idx = (row * w + col) * 4
-            r, g, b, a = rgba[idx:idx + 4]
+            idx = (row*w + col)*4
+            r, g, b, a = rgba[idx:idx+4]
             bgra += bytes([b, g, r, a])
-
     row_stride = ((w + 31) // 32) * 4
     and_mask   = bytes(row_stride * h)
-
     return header + bytes(bgra) + and_mask
 
 
 def write_ico(path, images):
-    """images: list of (size, rgba_bytes)"""
     n      = len(images)
     blobs  = [make_bmp_blob(s, s, rb) for s, rb in images]
-    offset = 6 + 16 * n
-
+    offset = 6 + 16*n
     ico_hdr = struct.pack('<HHH', 0, 1, n)
     dir_entries = b''
     for (s, _), blob in zip(images, blobs):
         dir_entries += struct.pack('<BBBBHHII',
-            s if s < 256 else 0,
-            s if s < 256 else 0,
+            s if s < 256 else 0, s if s < 256 else 0,
             0, 0, 1, 32, len(blob), offset)
         offset += len(blob)
-
     with open(path, 'wb') as f:
         f.write(ico_hdr + dir_entries)
         for blob in blobs:
             f.write(blob)
 
 
-def write_header(path, px32):
-    flat = flatten(px32)
+def write_header(path, pix32):
+    flat = flatten(pix32)
     lines = [
         '#pragma once',
         '',
         'static const unsigned char app_icon_32x32[32 * 32 * 4] = {',
     ]
-    for row in range(0, len(flat), 128):   # 32 pixels × 4 bytes
-        chunk = flat[row:row + 128]
+    for row in range(0, len(flat), 128):
+        chunk = flat[row:row+128]
         lines.append('  ' + ', '.join(f'0x{b:02x}' for b in chunk) + ',')
     lines.append('};')
     with open(path, 'w') as f:
@@ -178,9 +233,9 @@ if __name__ == '__main__':
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     os.makedirs(os.path.join(root, 'assets'), exist_ok=True)
 
-    px16 = draw_16()
-    px32 = draw_32()
-    px48 = draw_48()
+    px16 = make_pixels(16)
+    px32 = make_pixels(32)
+    px48 = make_pixels(48)
 
     ico_path = os.path.join(root, 'assets', 'icon.ico')
     hdr_path = os.path.join(root, 'src', 'rendering', 'app_icon.h')
