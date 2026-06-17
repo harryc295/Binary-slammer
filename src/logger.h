@@ -7,6 +7,7 @@
 #include <vector>
 
 #include "singleton.h"
+#include "app_dirs.h"
 
 struct log_t
 {
@@ -86,9 +87,7 @@ private:
     if (m_logfile.is_open())
       return true;
     
-    m_logfile.open(std::string(
-        "./binaryhammer.log"
-      ));
+    m_logfile.open(bh_path("binaryhammer.log"));
     
     return m_logfile.is_open();
   }

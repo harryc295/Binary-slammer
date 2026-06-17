@@ -1,5 +1,6 @@
 #include "ui.h"
 #include "app_icon.h"
+#include "../app_dirs.h"
 
 #include <algorithm>
 #include <cctype>
@@ -353,21 +354,23 @@ bool UI::create_window() {
     {
         static const int k_layout_ver = 4;
         int stored = 0;
-        if (FILE *vf = fopen("bh_layout.ver", "r")) { fscanf(vf, "%d", &stored); fclose(vf); }
+        if (FILE *vf = fopen(bh_path("bh_layout.ver").c_str(), "r")) { fscanf(vf, "%d", &stored); fclose(vf); }
         if (stored != k_layout_ver) {
-            remove("imgui.ini");
-            if (FILE *vf = fopen("bh_layout.ver", "w")) { fprintf(vf, "%d", k_layout_ver); fclose(vf); }
+            remove(bh_path("imgui.ini").c_str());
+            if (FILE *vf = fopen(bh_path("bh_layout.ver").c_str(), "w")) { fprintf(vf, "%d", k_layout_ver); fclose(vf); }
         }
     }
 
     ImGui::CreateContext();
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
+    static std::string s_ini_path = bh_path("imgui.ini");
+    io.IniFilename = s_ini_path.c_str();
 
     // Load persisted theme (1 = dark, 0 = light; default dark)
     {
         int stored = 1;
-        FILE *tf = fopen("bh_settings.dat", "r");
+        FILE *tf = fopen(bh_path("bh_settings.dat").c_str(), "r");
         if (tf) { fscanf(tf, "%d", &stored); fclose(tf); }
         g_dark_theme = (stored != 0);
     }
@@ -2171,7 +2174,7 @@ bool UI::render_frame() {
         g_theme_changed = false;
         if (g_dark_theme) ImGui::StyleColorsDark();
         else              ImGui::StyleColorsLight();
-        if (FILE *tf = fopen("bh_settings.dat", "w")) {
+        if (FILE *tf = fopen(bh_path("bh_settings.dat").c_str(), "w")) {
             fprintf(tf, "%d", g_dark_theme ? 1 : 0); fclose(tf);
         }
     }
@@ -2179,7 +2182,7 @@ bool UI::render_frame() {
     // ── Onboarding modal ─────────────────────────────────────────────────
     if (!s_onboard_checked) {
         s_onboard_checked = true;
-        FILE *vf = fopen("bh_onboarded.ver", "r");
+        FILE *vf = fopen(bh_path("bh_onboarded.ver").c_str(), "r");
         if (vf) { fclose(vf); }
         else    { s_show_onboard = true; }
     }
@@ -2324,7 +2327,7 @@ bool UI::render_frame() {
                 ImGui::SetCursorPosX(win_w - bw_load - gap - bw_skip - pad);
                 if (ImGui::Button("Skip", {bw_skip, 0})) {
                     if (s_onboard_skip) {
-                        if (FILE *f = fopen("bh_onboarded.ver", "w")) { fputs("1", f); fclose(f); }
+                        if (FILE *f = fopen(bh_path("bh_onboarded.ver").c_str(), "w")) { fputs("1", f); fclose(f); }
                     }
                     s_show_onboard = false;
                     ImGui::CloseCurrentPopup();
@@ -2332,7 +2335,7 @@ bool UI::render_frame() {
                 ImGui::SameLine(0, gap);
                 if (ImGui::Button("Load File", {bw_load, 0})) {
                     if (s_onboard_skip) {
-                        if (FILE *f = fopen("bh_onboarded.ver", "w")) { fputs("1", f); fclose(f); }
+                        if (FILE *f = fopen(bh_path("bh_onboarded.ver").c_str(), "w")) { fputs("1", f); fclose(f); }
                     }
                     s_show_onboard = false;
                     ImGui::CloseCurrentPopup();

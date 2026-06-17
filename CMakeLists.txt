@@ -58,6 +58,10 @@ target_link_libraries(app PRIVATE
   Zydis::Zydis
 )
 
+if(WIN32)
+  target_link_libraries(app PRIVATE shell32 ole32)
+endif()
+
 if(LLVM_FOUND)
   llvm_map_components_to_libnames(llvm_libs
     core analysis transformutils scalaropts instcombine ipo support passes)

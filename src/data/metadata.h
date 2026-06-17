@@ -1,4 +1,5 @@
 #pragma once
+#include "../app_dirs.h"
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
@@ -24,7 +25,7 @@ inline uint64_t path_key(const std::string &p) {
 
 inline std::string meta_filename(const std::string &bin_path) {
     char buf[32]; snprintf(buf, sizeof(buf), "bh_%016llx.meta", (unsigned long long)path_key(bin_path));
-    return buf;
+    return bh_dir() + buf;
 }
 
 inline void load(const std::string &bin_path) {
