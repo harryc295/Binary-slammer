@@ -3,11 +3,31 @@
 #include "binary/binary.h"
 #include "rendering/nav_state.h"
 
+#include <cstring>
+#include <cstdio>
 #include <map>
 #include <sstream>
 #include <vector>
 
-static void cmd_demo()  { Logger::get()->log("Demo command called!", "Demo"); }
+static void cmd_demo() {
+    static const char *candidates[] = {
+        "C:\\Windows\\System32\\notepad.exe",
+        "C:\\Windows\\System32\\calc.exe",
+        "C:\\Windows\\System32\\mspaint.exe",
+        nullptr
+    };
+    for (int i = 0; candidates[i]; ++i) {
+        FILE *f = fopen(candidates[i], "rb");
+        if (!f) continue;
+        fclose(f);
+        strncpy(g_demo_path, candidates[i], 511);
+        g_demo_path[511] = '\0';
+        g_load_pending   = true;
+        Logger::get()->log(std::string("Loading demo binary: ") + candidates[i], "Demo");
+        return;
+    }
+    Logger::get()->log("No suitable demo binary found (looked for notepad.exe, calc.exe, mspaint.exe).", "Demo");
+}
 static void cmd_exit()  { exit(0); }
 static void cmd_clear() { Logger::get()->clear_logs(); Logger::get()->log("Console cleared.", "Console"); }
 
@@ -45,7 +65,7 @@ struct command_t {
 static std::map<std::string, command_t> commands = {
     {"exit",  {"Exit BinaryHammer",                        cmd_exit,  {}}},
     {"clear", {"Clear the console",                        cmd_clear, {}}},
-    {"demo",  {"Demo command (testing)",                   cmd_demo,  {"Takes no arguments."}}},
+    {"demo",  {"Load a demo PE (notepad.exe) for quick exploration", cmd_demo, {"Usage: .demo — loads the first available system binary (notepad/calc/mspaint)."}}},
     {"info",  {"Print a summary of the loaded binary",     cmd_info,  {"Usage: .info"}}},
 };
 

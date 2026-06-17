@@ -42,6 +42,8 @@
 // Navigation state is defined here (declared extern in nav_state.h)
 int64_t g_nav_hex_offset = -1;
 int64_t g_nav_disasm_rva = -1;
+bool    g_load_pending   = false;
+char    g_demo_path[512] = {};
 static bool     g_binary_changed   = false;
 
 // Forward declarations
@@ -362,7 +364,15 @@ bool UI::create_window() {
     ImGuiIO &io = ImGui::GetIO();
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_DockingEnable;
 
-    ImGui::StyleColorsDark();
+    // Load persisted theme (1 = dark, 0 = light; default dark)
+    {
+        int stored = 1;
+        FILE *tf = fopen("bh_settings.dat", "r");
+        if (tf) { fscanf(tf, "%d", &stored); fclose(tf); }
+        g_dark_theme = (stored != 0);
+    }
+    if (g_dark_theme) ImGui::StyleColorsDark();
+    else              ImGui::StyleColorsLight();
     ImGuiStyle &style = ImGui::GetStyle();
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
@@ -2156,11 +2166,14 @@ bool UI::render_frame() {
         menubar_h = ImGui::GetFrameHeight();
     }
 
-    // Apply theme when toggled
+    // Apply theme when toggled — persist choice to disk
     if (g_theme_changed) {
         g_theme_changed = false;
         if (g_dark_theme) ImGui::StyleColorsDark();
         else              ImGui::StyleColorsLight();
+        if (FILE *tf = fopen("bh_settings.dat", "w")) {
+            fprintf(tf, "%d", g_dark_theme ? 1 : 0); fclose(tf);
+        }
     }
 
     // ── Onboarding modal ─────────────────────────────────────────────────
@@ -2340,6 +2353,22 @@ bool UI::render_frame() {
             if (open_binary.is_open()) {
                 rebuild_cache();
                 Logger::get()->log("Loaded: " + path, "BinaryAnalyzer");
+            }
+        }
+    }
+
+    // ── Programmatic load (e.g. .demo command) ───────────────────────────
+    if (g_load_pending) {
+        g_load_pending = false;
+        if (g_demo_path[0]) {
+            std::string path(g_demo_path);
+            g_demo_path[0] = '\0';
+            open_binary = Binary(path);
+            if (open_binary.is_open()) {
+                rebuild_cache();
+                Logger::get()->log("Demo loaded: " + path, "Demo");
+            } else {
+                Logger::get()->log("Failed to load demo binary.", "Demo");
             }
         }
     }
