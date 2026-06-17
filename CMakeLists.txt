@@ -23,6 +23,10 @@ set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
 #set(CMAKE_BUILD_TYPE Debug)
 set (CMAKE_BUILD_TYPE Release)
 
+if(WIN32)
+  enable_language(RC)
+endif()
+
 add_executable(app)
 
 file(GLOB_RECURSE app_SOURCES
@@ -36,6 +40,10 @@ file(GLOB_RECURSE app_SOURCES
   "incl/*.h"
   "incl/*.inl"
 )
+
+if(WIN32)
+  list(APPEND app_SOURCES resources.rc)
+endif()
 
 target_sources(app PRIVATE ${app_SOURCES})
 

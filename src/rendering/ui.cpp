@@ -1,4 +1,5 @@
 #include "ui.h"
+#include "app_icon.h"
 
 #include <algorithm>
 #include <cctype>
@@ -337,8 +338,13 @@ bool UI::create_window() {
                                 "BinaryHammer", nullptr, nullptr);
     if (!m_window) return false;
 
+    glfwMaximizeWindow(m_window);
     glfwMakeContextCurrent(m_window);
     glfwSwapInterval(1);
+
+    // Set window icon
+    GLFWimage icon_img{32, 32, const_cast<unsigned char*>(app_icon_32x32)};
+    glfwSetWindowIcon(m_window, 1, &icon_img);
 
     // If the layout version file is missing or stale, wipe imgui.ini so the
     // dock builder runs fresh (prevents new panels from floating after updates).
@@ -2006,6 +2012,14 @@ static void render_overview_panel() {
     ImGui::ProgressBar(frac, ImVec2(-1.f, 10.f), "");
     ImGui::PopStyleColor();
 
+    ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(.55f, .55f, .55f, 1.f));
+    ImGui::TextWrapped("This score is a rough static analysis estimate based on import patterns, "
+                       "entropy, and known signatures. It is not a definitive verdict -- legitimate "
+                       "software can score high (e.g. installers, packers) and some malware may "
+                       "score low if well-obfuscated. Always verify with dynamic analysis or an AV "
+                       "scanner before drawing conclusions.");
+    ImGui::PopStyleColor();
+
     ImGui::Spacing();
 
     // ── Narrative ────────────────────────────────────────────────────────
@@ -2097,6 +2111,13 @@ bool UI::render_frame() {
     ImGui_ImplGlfw_NewFrame();
     ImGui::NewFrame();
 
+    // ── Onboarding state ─────────────────────────────────────────────────
+    static bool s_onboard_checked = false;
+    static bool s_show_onboard    = false;
+    static int  s_onboard_page    = 0;
+    static bool s_onboard_skip    = false;
+    static bool s_open_onboard    = false;
+
     // ── Menu bar ─────────────────────────────────────────────────────────
     static bool open_file_dialog = false;
     float menubar_h = 0.f;
@@ -2128,7 +2149,7 @@ bool UI::render_frame() {
             ImGui::EndMenu();
         }
         if (ImGui::BeginMenu("Help")) {
-            if (ImGui::MenuItem("About")) {}
+            if (ImGui::MenuItem("About / Help")) s_open_onboard = true;
             ImGui::EndMenu();
         }
         ImGui::EndMainMenuBar();
@@ -2142,20 +2163,172 @@ bool UI::render_frame() {
         else              ImGui::StyleColorsLight();
     }
 
-    // ── Welcome popup ────────────────────────────────────────────────────
-    static bool first_run = true;
-    if (first_run) { ImGui::OpenPopup("Welcome"); first_run = false; }
+    // ── Onboarding modal ─────────────────────────────────────────────────
+    if (!s_onboard_checked) {
+        s_onboard_checked = true;
+        FILE *vf = fopen("bh_onboarded.ver", "r");
+        if (vf) { fclose(vf); }
+        else    { s_show_onboard = true; }
+    }
+    if (s_open_onboard) {
+        s_open_onboard = false;
+        s_show_onboard = true;
+        s_onboard_page = 0;
+        s_onboard_skip = false;
+    }
+    if (s_show_onboard && !ImGui::IsPopupOpen("##Onboarding"))
+        ImGui::OpenPopup("##Onboarding");
 
-    ImVec2 center = ImGui::GetMainViewport()->GetCenter();
-    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(.5f,.5f));
-    if (ImGui::BeginPopupModal("Welcome", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Text("BinaryHammer");
-        ImGui::TextDisabled("Open a PE binary to begin analysis.");
-        ImGui::Separator();
-        if (ImGui::Button("Load File", ImVec2(120,0))) { ImGui::CloseCurrentPopup(); open_file_dialog = true; }
-        ImGui::SameLine();
-        if (ImGui::Button("Exit", ImVec2(120,0))) glfwSetWindowShouldClose(m_window, true);
-        ImGui::EndPopup();
+    {
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, {0.5f, 0.5f});
+        ImGui::SetNextWindowSize({580, 0}, ImGuiCond_Always);
+        if (ImGui::BeginPopupModal("##Onboarding", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize)) {
+            ImGuiStyle &sty = ImGui::GetStyle();
+            const ImVec4 kOrange{0.86f, 0.35f, 0.16f, 1.f};
+            const ImVec4 kBlue  {0.50f, 0.72f, 1.00f, 1.f};
+            const ImVec4 kGold  {0.86f, 0.72f, 0.30f, 1.f};
+            const ImVec4 kMuted {0.55f, 0.55f, 0.55f, 1.f};
+
+            // ── Progress dots ────────────────────────────────────────────
+            float dot_total = 3 * 12.f + 2 * 8.f;
+            ImGui::SetCursorPosX((580 - dot_total) * 0.5f);
+            for (int i = 0; i < 3; ++i) {
+                ImGui::TextColored(i == s_onboard_page ? kOrange : ImVec4{0.35f,0.35f,0.35f,1.f},
+                                   i == s_onboard_page ? "●" : "○");
+                if (i < 2) ImGui::SameLine(0, 8.f);
+            }
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // ── Page content ─────────────────────────────────────────────
+            if (s_onboard_page == 0) {
+                float title_w = ImGui::CalcTextSize("BinaryHammer").x;
+                ImGui::SetCursorPosX((ImGui::GetWindowWidth() - title_w) * 0.5f);
+                ImGui::TextColored(kOrange, "BinaryHammer");
+                ImGui::Spacing();
+                ImGui::TextWrapped(
+                    "An open-source PE binary analysis tool for malware analysts and reverse "
+                    "engineers who need fast, structured inspection without the overhead of "
+                    "commercial tools.");
+                ImGui::Spacing();
+                ImGui::TextWrapped(
+                    "Load any Windows PE executable and BinaryHammer will automatically detect "
+                    "functions, disassemble them, extract imports/exports, compute section entropy, "
+                    "and flag suspicious patterns.");
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextColored(kBlue, "What's included:");
+                ImGui::BulletText("x86 / x64 PE support (EXE, DLL, SYS)");
+                ImGui::BulletText("Zydis-powered disassembly with annotated call targets");
+                ImGui::BulletText("Pseudo-C code lifting from assembly");
+                ImGui::BulletText("Shannon entropy analysis per section");
+                ImGui::BulletText("YARA rule scanning");
+                ImGui::BulletText("JSON report export");
+
+            } else if (s_onboard_page == 1) {
+                ImGui::TextColored(kOrange, "Panel Overview");
+                ImGui::Spacing();
+
+                auto row = [&](const char *name, const char *desc) {
+                    ImGui::TextColored(kGold, "  %-20s", name);
+                    ImGui::SameLine();
+                    ImGui::TextWrapped("%s", desc);
+                };
+
+                ImGui::TextColored(kBlue, "Left");
+                row("Function Explorer", "All detected functions; click to disassemble. Rename/bookmark/xref via right-click.");
+                ImGui::Spacing();
+
+                ImGui::TextColored(kBlue, "Center");
+                row("Disassembly",  "Full x86/x64 disassembly. Hover instructions for details; click RVAs to navigate.");
+                row("Pseudo Code",  "Lifted pseudo-C view of the selected function.");
+                row("Hex View",     "Raw byte view with offset jumping and byte-pattern search.");
+                row("Call Graph",   "Visual call graph centred on the current function.");
+                ImGui::Spacing();
+
+                ImGui::TextColored(kBlue, "Right");
+                row("Overview",    "At-a-glance threat score and binary summary.");
+                row("Strings",     "Extracted ASCII / UTF-16 strings with filter.");
+                row("Imports",     "DLL dependencies grouped by category (net, crypto, …).");
+                row("Exports",     "Exported symbols with RVAs.");
+                row("PE Headers",  "Full COFF / Optional header dump.");
+                row("Sections",    "Section table with entropy and flags.");
+                ImGui::Spacing();
+
+                ImGui::TextColored(kBlue, "Bottom");
+                row("Security",    "Packer detection, W+X sections, suspicious IOC strings, threat score.");
+                row("YARA",        "Run custom YARA rule files against the loaded binary.");
+                row("Search",      "Hex byte-pattern search across the full file.");
+                row("Console",     "CLI interface — type  .help  for the full command list.");
+
+            } else {
+                ImGui::TextColored(kOrange, "Getting Started");
+                ImGui::Spacing();
+
+                auto step = [&](const char *num, const char *text) {
+                    ImGui::TextColored(kGold, "%s", num);
+                    ImGui::SameLine();
+                    ImGui::TextWrapped("%s", text);
+                    ImGui::Spacing();
+                };
+
+                step("1.", "Open a binary via  File > Open  (Ctrl+O). Any PE file will work — EXE, DLL, SYS.");
+                step("2.", "Functions are detected automatically. Click one in the Function Explorer to disassemble it.");
+                step("3.", "Right-click any function to  Rename  it, add a  Bookmark, or view  Show Callers.");
+                step("4.", "Check the  Security Analysis  and  Overview  panels for an automated threat summary and risk score.");
+                step("5.", "Export findings via  File > Export JSON Report. Reopen this guide any time from  Help > About / Help.");
+
+                ImGui::Separator();
+                ImGui::Spacing();
+                ImGui::TextColored(kMuted, "Tip: resize and rearrange panels freely — the layout is saved between sessions.");
+                ImGui::Spacing();
+                ImGui::Checkbox("Don't show this again on startup", &s_onboard_skip);
+            }
+
+            // ── Navigation row ───────────────────────────────────────────
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            if (s_onboard_page > 0) {
+                if (ImGui::Button("< Back", {80, 0})) --s_onboard_page;
+                ImGui::SameLine();
+            }
+
+            float win_w  = ImGui::GetWindowWidth();
+            float pad    = sty.WindowPadding.x;
+
+            if (s_onboard_page < 2) {
+                float bw = 80.f;
+                ImGui::SetCursorPosX(win_w - bw - pad);
+                if (ImGui::Button("Next >", {bw, 0})) ++s_onboard_page;
+            } else {
+                float bw_load = 110.f, bw_skip = 70.f, gap = 8.f;
+                ImGui::SetCursorPosX(win_w - bw_load - gap - bw_skip - pad);
+                if (ImGui::Button("Skip", {bw_skip, 0})) {
+                    if (s_onboard_skip) {
+                        if (FILE *f = fopen("bh_onboarded.ver", "w")) { fputs("1", f); fclose(f); }
+                    }
+                    s_show_onboard = false;
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine(0, gap);
+                if (ImGui::Button("Load File", {bw_load, 0})) {
+                    if (s_onboard_skip) {
+                        if (FILE *f = fopen("bh_onboarded.ver", "w")) { fputs("1", f); fclose(f); }
+                    }
+                    s_show_onboard = false;
+                    ImGui::CloseCurrentPopup();
+                    open_file_dialog = true;
+                }
+            }
+
+            ImGui::EndPopup();
+        }
     }
 
     // ── Open file ────────────────────────────────────────────────────────
