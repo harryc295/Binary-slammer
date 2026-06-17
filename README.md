@@ -12,6 +12,8 @@ A fast, lightweight PE reverse engineering tool for Windows — built for anyone
 
 Load a PE binary (`.exe`, `.dll`, `.sys`) and immediately get a full analysis — no setup, no scripts, no external tools.
 
+On first launch a 3-page onboarding guide walks you through every panel and how to use them. Re-open it any time from **Help → About / Help**.
+
 ### Analysis & Overview
 - **Threat Overview** — 0–100 threat score with colour-coded verdict (Likely Clean / Suspicious / Likely Malicious / Highly Suspicious). Plain-English summary of what the binary does, key findings bullet list, and a "Is This Normal?" table comparing each property to expected ranges. Import behaviour category badges show at a glance what capability groups are present.
 - **Security Analysis** — signature-based detection of packers, protectors, anti-debug tricks, and suspicious patterns with per-finding descriptions.
@@ -110,13 +112,14 @@ ImGui (docking branch) is bundled in `incl/`.
 
 ## Usage
 
-1. Launch `app.exe`.
-2. **File → Open** (or drag and drop) to load a PE.
-3. The **Overview** panel gives an immediate threat assessment.
-4. Use **Function Explorer** to navigate functions — **Disassembly** and **Pseudo Code** update instantly.
-5. Toggle **Explain** in the Disassembly toolbar for plain-English instruction annotations.
-6. Click any section row in **Sections** to expand its description card.
-7. Switch **Imports → By Category** for a behaviour-grouped view of what the binary does.
+1. Launch `app.exe` — the window opens maximised with a custom app icon.
+2. A **3-page onboarding guide** appears on first run, covering every panel and workflow. Dismiss it and it won't show again; reopen it any time via **Help → About / Help**.
+3. **File → Open** (or `Ctrl+O`) to load a PE.
+4. The **Overview** panel gives an immediate threat assessment.
+5. Use **Function Explorer** to navigate functions — **Disassembly** and **Pseudo Code** update instantly.
+6. Toggle **Explain** in the Disassembly toolbar for plain-English instruction annotations.
+7. Click any section row in **Sections** to expand its description card.
+8. Switch **Imports → By Category** for a behaviour-grouped view of what the binary does.
 
 ### Console commands
 
@@ -171,12 +174,15 @@ src/
 ├── ir/
 │   └── ir_lifter.h / .cpp    — LLVM IR lifter (HAVE_LLVM guard)
 ├── rendering/
-│   ├── ui.h / .cpp           — all panels, docking layout, file loading
+│   ├── ui.h / .cpp           — all panels, docking layout, onboarding, file loading
+│   ├── app_icon.h            — embedded 32×32 RGBA app icon (orange hammer)
 │   ├── nav_state.h           — cross-panel navigation state
 │   └── file_prompt.h         — Windows IFileOpenDialog wrapper
 ├── data/
 │   ├── api_descriptions.h    — Win32 API descriptions with malware context
 │   └── section_flags.h       — IMAGE_SCN_* flag descriptions
+├── assets/
+│   └── icon.ico              — multi-resolution icon (16/32/48px) for the exe
 ├── logger.h                  — session log → binaryhammer.log
 └── main.cpp                  — entry point and window loop
 ```
