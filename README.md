@@ -97,6 +97,25 @@ cmake --build build --config Release
 
 vcpkg handles all dependencies automatically via `vcpkg.json`.
 
+### Linux
+
+Same UI, same codebase — Dear ImGui draws everything itself, so nothing native-themed differs between platforms.
+
+```sh
+sudo apt install libgl1-mesa-dev libxrandr-dev libxinerama-dev libxcursor-dev \
+  libxi-dev libxext-dev libwayland-dev libxkbcommon-dev wayland-protocols
+
+git clone https://github.com/harryc295/Binary-slammer.git
+cd Binary-slammer
+git clone https://github.com/microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+./build/binaryslammer
+```
+
+`zenity` or `kdialog` is used for the native file-open dialog — install whichever your desktop ships with.
+
 ### Dependencies
 
 | Package | Purpose | Required |
