@@ -143,3 +143,10 @@ jobs:
     - name: Test
       working-directory: ${{ steps.strings.outputs.build-output-dir }}
       run: ctest --build-config ${{ matrix.build_type }}
+
+    - name: Upload macOS binary
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaryslammer-macos-arm64
+        path: ${{ steps.strings.outputs.build-output-dir }}/binaryslammer
