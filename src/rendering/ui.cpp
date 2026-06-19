@@ -421,8 +421,16 @@ bool UI::create_window() {
     glfwSetErrorCallback(glfw_error_callback);
     if (!glfwInit()) return false;
 
+#ifdef __APPLE__
+    // macOS has no GL 3.0 compatibility profile — only legacy 2.1 or core 3.2+.
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 2);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GLFW_TRUE);
+#else
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 0);
+#endif
 
     float scale = ImGui_ImplGlfw_GetContentScaleForMonitor(glfwGetPrimaryMonitor());
     m_window = glfwCreateWindow(static_cast<int>(1280 * scale),
@@ -470,7 +478,11 @@ bool UI::create_window() {
     style.FontScaleDpi = scale;
 
     ImGui_ImplGlfw_InitForOpenGL(m_window, true);
+#ifdef __APPLE__
+    ImGui_ImplOpenGL3_Init("#version 150");
+#else
     ImGui_ImplOpenGL3_Init("#version 130");
+#endif
 
 #ifdef HAVE_YARA
     yr_initialize();

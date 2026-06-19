@@ -122,6 +122,22 @@ Two things that vary by setup, not by distro:
 - **File dialog:** Kali's default Xfce spin doesn't ship `zenity` or `kdialog` — run `sudo apt install zenity` if the open-file dialog comes back empty.
 - **Rendering:** needs an OpenGL 3.0 context. On bare metal this is never an issue. In a VM (common for Kali) without 3D acceleration/GPU passthrough enabled, it falls back to Mesa's software renderer (`llvmpipe`) — same visuals, just slower.
 
+### macOS
+
+Same source, same UI. Needs the Xcode Command Line Tools (`xcode-select --install`) for a compiler and the system frameworks.
+
+```sh
+git clone https://github.com/harryc295/Binary-slammer.git
+cd Binary-slammer
+git clone https://github.com/microsoft/vcpkg.git
+./vcpkg/bootstrap-vcpkg.sh
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=vcpkg/scripts/buildsystems/vcpkg.cmake
+cmake --build build --config Release
+./build/binaryslammer
+```
+
+The open-file dialog uses `osascript` (Finder's native picker), which ships with every macOS install — no extra package needed.
+
 ### Dependencies
 
 | Package | Purpose | Required |

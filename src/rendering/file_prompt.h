@@ -64,6 +64,30 @@ std::string GetFileDialog()
 
 #include <cstdio>
 
+static std::string run_capture(const char *cmd)
+{
+  FILE *pipe = popen(cmd, "r");
+  if (!pipe) return "";
+  std::string result;
+  char buf[512];
+  while (fgets(buf, sizeof(buf), pipe))
+    result += buf;
+  pclose(pipe);
+  while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
+    result.pop_back();
+  return result;
+}
+
+#ifdef __APPLE__
+
+std::string GetFileDialog()
+{
+  return run_capture(
+    "osascript -e 'POSIX path of (choose file with prompt \"Open Binary\")' 2>/dev/null");
+}
+
+#else
+
 std::string GetFileDialog()
 {
   const char *cmds[] = {
@@ -71,19 +95,12 @@ std::string GetFileDialog()
     "kdialog --getopenfilename . '*' 2>/dev/null",
   };
   for (const char *cmd : cmds) {
-    FILE *pipe = popen(cmd, "r");
-    if (!pipe) continue;
-    std::string result;
-    char buf[512];
-    while (fgets(buf, sizeof(buf), pipe))
-      result += buf;
-    pclose(pipe);
-    while (!result.empty() && (result.back() == '\n' || result.back() == '\r'))
-      result.pop_back();
+    std::string result = run_capture(cmd);
     if (!result.empty()) return result;
   }
   return "";
 }
 
+#endif // __APPLE__
 #endif // !_WIN32
 #endif // !FILE_PROMPT_H
