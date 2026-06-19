@@ -1,9 +1,18 @@
 cmake_minimum_required(VERSION 3.28)
 
+# Static triplet so the release exe has no Zydis.dll/glfw3.dll to ship alongside it.
+if(WIN32 AND NOT DEFINED VCPKG_TARGET_TRIPLET)
+  set(VCPKG_TARGET_TRIPLET "x64-windows-static" CACHE STRING "")
+endif()
+
 project(binaryslammer)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED True)
+
+if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
 
 find_package(glfw3 CONFIG REQUIRED)
 find_package(OpenGL REQUIRED)
