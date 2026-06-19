@@ -1,0 +1,9 @@
+{
+  "name": "binaryslammer",
+  "version-string": "0.0.1",
+  "dependencies": [
+    "opengl",
+    "glfw3",
+    "zydis"
+  ]
+}

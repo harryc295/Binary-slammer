@@ -1,0 +1,152 @@
+name: CMake on multiple platforms
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        build_type: [Release]
+        c_compiler: [gcc, clang, cl]
+        include:
+          - os: windows-latest
+            c_compiler: cl
+            cpp_compiler: cl
+          - os: ubuntu-latest
+            c_compiler: gcc
+            cpp_compiler: g++
+          - os: ubuntu-latest
+            c_compiler: clang
+            cpp_compiler: clang++
+          - os: macos-latest
+            c_compiler: clang
+            cpp_compiler: clang++
+        exclude:
+          - os: windows-latest
+            c_compiler: gcc
+          - os: windows-latest
+            c_compiler: clang
+          - os: ubuntu-latest
+            c_compiler: cl
+          - os: macos-latest
+            c_compiler: gcc
+          - os: macos-latest
+            c_compiler: cl
+
+    steps:
+    - uses: actions/checkout@v4
+      env:
+        FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    - name: Install Linux system dependencies
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          libgl1-mesa-dev \
+          libxrandr-dev \
+          libxinerama-dev \
+          libxcursor-dev \
+          libxi-dev \
+          libxext-dev \
+          libwayland-dev \
+          libxkbcommon-dev \
+          wayland-protocols \
+          llvm-18-dev
+
+    - name: Cache LLVM (Windows)
+      if: runner.os == 'Windows'
+      id: cache-llvm
+      uses: actions/cache@v4
+      with:
+        path: D:\llvm
+        key: llvm-18.1.8-win-msvc-notools-v2
+
+    - name: Build LLVM from source (Windows)
+      if: runner.os == 'Windows' && steps.cache-llvm.outputs.cache-hit != 'true'
+      shell: pwsh
+      run: |
+        Write-Host "Downloading LLVM 18.1.8 monorepo source..."
+        Invoke-WebRequest -Uri "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-project-18.1.8.src.tar.xz" -OutFile "D:\llvm-src.tar.xz" -UseBasicParsing
+        Write-Host "Extracting llvm/ and cmake/ only..."
+        New-Item -ItemType Directory -Force "D:\llvm-src" | Out-Null
+        tar -xf "D:\llvm-src.tar.xz" -C "D:\llvm-src" "llvm-project-18.1.8.src/llvm" "llvm-project-18.1.8.src/cmake"
+        Write-Host "Configuring LLVM..."
+        cmake -B "D:\llvm-bld" `
+          -DCMAKE_BUILD_TYPE=Release `
+          -DLLVM_ENABLE_RTTI=ON `
+          -DLLVM_TARGETS_TO_BUILD=X86 `
+          -DLLVM_BUILD_TOOLS=OFF `
+          -DLLVM_INCLUDE_TESTS=OFF `
+          -DLLVM_INCLUDE_EXAMPLES=OFF `
+          -DLLVM_INCLUDE_BENCHMARKS=OFF `
+          -DCMAKE_INSTALL_PREFIX="D:\llvm" `
+          -S "D:\llvm-src\llvm-project-18.1.8.src\llvm"
+        cmake --build "D:\llvm-bld" --config Release -j8
+        cmake --install "D:\llvm-bld" --config Release
+        Write-Host "LLVM build and install complete"
+
+    - name: Setup vcpkg
+      uses: lukka/run-vcpkg@v11
+      with:
+        vcpkgGitCommitId: '8cce1e1118ea2569d5117f096035671a8490b8f4'
+
+    - name: Set reusable strings
+      id: strings
+      shell: bash
+      run: |
+        echo "build-output-dir=${{ github.workspace }}/build" >> "$GITHUB_OUTPUT"
+
+    - name: Configure CMake (Linux)
+      if: runner.os == 'Linux'
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        -DLLVM_DIR=/usr/lib/llvm-18/cmake
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (Windows)
+      if: runner.os == 'Windows'
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        -DLLVM_DIR=D:/llvm/lib/cmake/llvm
+        -S ${{ github.workspace }}
+
+    - name: Configure CMake (macOS)
+      if: runner.os == 'macOS'
+      run: >
+        cmake -B ${{ steps.strings.outputs.build-output-dir }}
+        -DCMAKE_CXX_COMPILER=${{ matrix.cpp_compiler }}
+        -DCMAKE_C_COMPILER=${{ matrix.c_compiler }}
+        -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+        -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+        -S ${{ github.workspace }}
+
+    - name: Build
+      run: cmake --build ${{ steps.strings.outputs.build-output-dir }} --config ${{ matrix.build_type }}
+
+    - name: Test
+      working-directory: ${{ steps.strings.outputs.build-output-dir }}
+      run: ctest --build-config ${{ matrix.build_type }}
+
+    - name: Upload macOS binary
+      if: runner.os == 'macOS'
+      uses: actions/upload-artifact@v4
+      with:
+        name: binaryslammer-macos-arm64
+        path: ${{ steps.strings.outputs.build-output-dir }}/binaryslammer
