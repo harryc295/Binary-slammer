@@ -17,6 +17,11 @@ config.json
 imgui.ini
 bh_settings.dat
 bh_onboarded.ver
+bh_api_keys.dat
+bh_layout.ver
+build_log.txt
+*.obj
+dist/
 
 # vcpkg
 vcpkg-manifest-install.log

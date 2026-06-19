@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cfloat>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -20,7 +21,9 @@
 #include "../binary/disassembler.h"
 #include "../console_handler.h"
 #include "../data/api_descriptions.h"
+#include "../data/api_settings.h"
 #include "../data/metadata.h"
+#include "../data/open_url.h"
 #include "../data/section_flags.h"
 #include "../decompiler/lifter.h"
 #include "../analysis/cfg.h"
@@ -90,6 +93,92 @@ static int  g_sel_section  = -1;
 
 static bool g_dark_theme    = true;
 static bool g_theme_changed = false;
+static api_settings_t g_api_settings;
+
+// Hammer-amber accent (matches the app icon) over a richer near-black dark
+// theme, replacing ImGui's flat default palette. Rounding/spacing apply to
+// both themes; color overrides are tuned per-theme for contrast.
+static void apply_theme(bool dark) {
+    if (dark) ImGui::StyleColorsDark();
+    else      ImGui::StyleColorsLight();
+
+    ImGuiStyle &style = ImGui::GetStyle();
+    style.WindowRounding    = 6.0f;
+    style.ChildRounding     = 6.0f;
+    style.FrameRounding     = 4.0f;
+    style.PopupRounding     = 6.0f;
+    style.ScrollbarRounding = 8.0f;
+    style.GrabRounding      = 4.0f;
+    style.TabRounding       = 4.0f;
+    style.WindowPadding     = ImVec2(10, 10);
+    style.FramePadding      = ImVec2(8, 4);
+    style.ItemSpacing       = ImVec2(8, 6);
+
+    const ImVec4 accent       (0.86f, 0.35f, 0.12f, 1.00f);
+    const ImVec4 accent_hover (0.95f, 0.45f, 0.18f, 1.00f);
+    const ImVec4 accent_active(0.75f, 0.28f, 0.08f, 1.00f);
+
+    ImVec4 *c = style.Colors;
+    if (dark) {
+        c[ImGuiCol_WindowBg]       = ImVec4(0.10f, 0.10f, 0.11f, 1.00f);
+        c[ImGuiCol_ChildBg]        = ImVec4(0.10f, 0.10f, 0.11f, 1.00f);
+        c[ImGuiCol_PopupBg]        = ImVec4(0.09f, 0.09f, 0.10f, 1.00f);
+        c[ImGuiCol_FrameBg]        = ImVec4(0.16f, 0.16f, 0.18f, 1.00f);
+        c[ImGuiCol_FrameBgHovered] = ImVec4(0.22f, 0.22f, 0.24f, 1.00f);
+        c[ImGuiCol_FrameBgActive]  = ImVec4(0.26f, 0.26f, 0.28f, 1.00f);
+        c[ImGuiCol_TitleBg]        = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+        c[ImGuiCol_TitleBgActive]  = ImVec4(0.12f, 0.12f, 0.13f, 1.00f);
+        c[ImGuiCol_MenuBarBg]      = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+        c[ImGuiCol_ScrollbarBg]    = ImVec4(0.08f, 0.08f, 0.09f, 1.00f);
+        c[ImGuiCol_TableHeaderBg]  = ImVec4(0.16f, 0.16f, 0.18f, 1.00f);
+        c[ImGuiCol_TableRowBgAlt]  = ImVec4(0.13f, 0.13f, 0.14f, 1.00f);
+    }
+
+    c[ImGuiCol_DockingPreview]      = accent;
+    c[ImGuiCol_CheckMark]           = accent_hover;
+    c[ImGuiCol_SliderGrab]          = accent;
+    c[ImGuiCol_SliderGrabActive]    = accent_hover;
+    c[ImGuiCol_Button]              = ImVec4(accent.x, accent.y, accent.z, 0.55f);
+    c[ImGuiCol_ButtonHovered]       = accent_hover;
+    c[ImGuiCol_ButtonActive]        = accent_active;
+    c[ImGuiCol_Header]              = ImVec4(accent.x, accent.y, accent.z, 0.45f);
+    c[ImGuiCol_HeaderHovered]       = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+    c[ImGuiCol_HeaderActive]        = accent_active;
+    c[ImGuiCol_Tab]                 = ImVec4(accent.x, accent.y, accent.z, 0.20f);
+    c[ImGuiCol_TabHovered]          = ImVec4(accent.x, accent.y, accent.z, 0.70f);
+    c[ImGuiCol_TabSelected]         = accent;
+    c[ImGuiCol_TabSelectedOverline]  = accent_hover;
+    c[ImGuiCol_ResizeGripHovered]   = accent_hover;
+    c[ImGuiCol_ResizeGripActive]    = accent_active;
+    c[ImGuiCol_SeparatorHovered]    = accent;
+    c[ImGuiCol_SeparatorActive]     = accent_hover;
+    c[ImGuiCol_TextSelectedBg]      = ImVec4(accent.x, accent.y, accent.z, 0.35f);
+}
+
+static void sync_key_buffers(char *vt_buf, size_t vt_sz, char *mb_buf, size_t mb_sz) {
+    strncpy(vt_buf, g_api_settings.virustotal_key.c_str(), vt_sz - 1);
+    strncpy(mb_buf, g_api_settings.malwarebazaar_key.c_str(), mb_sz - 1);
+}
+
+// Shared by the onboarding wizard's API-settings page and the standalone
+// Settings > API Keys modal, so the two never drift out of sync.
+static void render_api_key_fields(char *vt_buf, size_t vt_sz, char *mb_buf, size_t mb_sz,
+                                   const ImVec4 &accent) {
+    ImGui::TextColored(accent, "VirusTotal");
+    ImGui::TextDisabled("Hash / file reputation lookups.");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##vtkey", vt_buf, vt_sz, ImGuiInputTextFlags_Password);
+    if (ImGui::Button("Get a free VirusTotal API key"))
+        open_url("https://www.virustotal.com/gui/join-us");
+
+    ImGui::Spacing();
+    ImGui::TextColored(accent, "MalwareBazaar");
+    ImGui::TextDisabled("Malware sample database lookups (abuse.ch).");
+    ImGui::SetNextItemWidth(-FLT_MIN);
+    ImGui::InputText("##mbkey", mb_buf, mb_sz, ImGuiInputTextFlags_Password);
+    if (ImGui::Button("Get a free MalwareBazaar API key"))
+        open_url("https://bazaar.abuse.ch/account/api/");
+}
 
 // Security analysis
 static std::vector<security_finding_t> g_security_findings;
@@ -374,8 +463,8 @@ bool UI::create_window() {
         if (tf) { fscanf(tf, "%d", &stored); fclose(tf); }
         g_dark_theme = (stored != 0);
     }
-    if (g_dark_theme) ImGui::StyleColorsDark();
-    else              ImGui::StyleColorsLight();
+    g_api_settings = load_api_settings();
+    apply_theme(g_dark_theme);
     ImGuiStyle &style = ImGui::GetStyle();
     style.ScaleAllSizes(scale);
     style.FontScaleDpi = scale;
@@ -2130,6 +2219,9 @@ bool UI::render_frame() {
     static int  s_onboard_page    = 0;
     static bool s_onboard_skip    = false;
     static bool s_open_onboard    = false;
+    static bool s_open_settings   = false;
+    static char s_vt_key_buf[128] = {};
+    static char s_mb_key_buf[128] = {};
 
     // ── Menu bar ─────────────────────────────────────────────────────────
     static bool open_file_dialog = false;
@@ -2161,6 +2253,10 @@ bool UI::render_frame() {
             }
             ImGui::EndMenu();
         }
+        if (ImGui::BeginMenu("Settings")) {
+            if (ImGui::MenuItem("API Keys...")) s_open_settings = true;
+            ImGui::EndMenu();
+        }
         if (ImGui::BeginMenu("Help")) {
             if (ImGui::MenuItem("About / Help")) s_open_onboard = true;
             ImGui::EndMenu();
@@ -2172,8 +2268,7 @@ bool UI::render_frame() {
     // Apply theme when toggled — persist choice to disk
     if (g_theme_changed) {
         g_theme_changed = false;
-        if (g_dark_theme) ImGui::StyleColorsDark();
-        else              ImGui::StyleColorsLight();
+        apply_theme(g_dark_theme);
         if (FILE *tf = fopen(bh_path("bh_settings.dat").c_str(), "w")) {
             fprintf(tf, "%d", g_dark_theme ? 1 : 0); fclose(tf);
         }
@@ -2184,13 +2279,14 @@ bool UI::render_frame() {
         s_onboard_checked = true;
         FILE *vf = fopen(bh_path("bh_onboarded.ver").c_str(), "r");
         if (vf) { fclose(vf); }
-        else    { s_show_onboard = true; }
+        else    { s_show_onboard = true; sync_key_buffers(s_vt_key_buf, sizeof(s_vt_key_buf), s_mb_key_buf, sizeof(s_mb_key_buf)); }
     }
     if (s_open_onboard) {
         s_open_onboard = false;
         s_show_onboard = true;
         s_onboard_page = 0;
         s_onboard_skip = false;
+        sync_key_buffers(s_vt_key_buf, sizeof(s_vt_key_buf), s_mb_key_buf, sizeof(s_mb_key_buf));
     }
     if (s_show_onboard && !ImGui::IsPopupOpen("##Onboarding"))
         ImGui::OpenPopup("##Onboarding");
@@ -2208,12 +2304,12 @@ bool UI::render_frame() {
             const ImVec4 kMuted {0.55f, 0.55f, 0.55f, 1.f};
 
             // ── Progress dots ────────────────────────────────────────────
-            float dot_total = 3 * 12.f + 2 * 8.f;
+            float dot_total = 4 * 12.f + 3 * 8.f;
             ImGui::SetCursorPosX((580 - dot_total) * 0.5f);
-            for (int i = 0; i < 3; ++i) {
+            for (int i = 0; i < 4; ++i) {
                 ImGui::TextColored(i == s_onboard_page ? kOrange : ImVec4{0.35f,0.35f,0.35f,1.f},
                                    i == s_onboard_page ? "●" : "○");
-                if (i < 2) ImGui::SameLine(0, 8.f);
+                if (i < 3) ImGui::SameLine(0, 8.f);
             }
             ImGui::Spacing();
             ImGui::Separator();
@@ -2281,7 +2377,7 @@ bool UI::render_frame() {
                 row("Search",      "Hex byte-pattern search across the full file.");
                 row("Console",     "CLI interface — type  .help  for the full command list.");
 
-            } else {
+            } else if (s_onboard_page == 2) {
                 ImGui::TextColored(kOrange, "Getting Started");
                 ImGui::Spacing();
 
@@ -2301,6 +2397,22 @@ bool UI::render_frame() {
                 ImGui::Separator();
                 ImGui::Spacing();
                 ImGui::TextColored(kMuted, "Tip: resize and rearrange panels freely — the layout is saved between sessions.");
+
+            } else {
+                ImGui::TextColored(kOrange, "API Settings");
+                ImGui::Spacing();
+                ImGui::TextWrapped(
+                    "Optional — add free API keys to enable threat-intel lookups later. Keys are "
+                    "stored locally and never transmitted anywhere by BinaryHammer itself. You can "
+                    "skip this and set it up any time from  Settings > API Keys.");
+                ImGui::Spacing();
+                ImGui::Separator();
+                ImGui::Spacing();
+
+                render_api_key_fields(s_vt_key_buf, sizeof(s_vt_key_buf), s_mb_key_buf, sizeof(s_mb_key_buf), kOrange);
+
+                ImGui::Spacing();
+                ImGui::Separator();
                 ImGui::Spacing();
                 ImGui::Checkbox("Don't show this again on startup", &s_onboard_skip);
             }
@@ -2318,7 +2430,7 @@ bool UI::render_frame() {
             float win_w  = ImGui::GetWindowWidth();
             float pad    = sty.WindowPadding.x;
 
-            if (s_onboard_page < 2) {
+            if (s_onboard_page < 3) {
                 float bw = 80.f;
                 ImGui::SetCursorPosX(win_w - bw - pad);
                 if (ImGui::Button("Next >", {bw, 0})) ++s_onboard_page;
@@ -2326,6 +2438,9 @@ bool UI::render_frame() {
                 float bw_load = 110.f, bw_skip = 70.f, gap = 8.f;
                 ImGui::SetCursorPosX(win_w - bw_load - gap - bw_skip - pad);
                 if (ImGui::Button("Skip", {bw_skip, 0})) {
+                    g_api_settings.virustotal_key    = s_vt_key_buf;
+                    g_api_settings.malwarebazaar_key = s_mb_key_buf;
+                    save_api_settings(g_api_settings);
                     if (s_onboard_skip) {
                         if (FILE *f = fopen(bh_path("bh_onboarded.ver").c_str(), "w")) { fputs("1", f); fclose(f); }
                     }
@@ -2334,6 +2449,9 @@ bool UI::render_frame() {
                 }
                 ImGui::SameLine(0, gap);
                 if (ImGui::Button("Load File", {bw_load, 0})) {
+                    g_api_settings.virustotal_key    = s_vt_key_buf;
+                    g_api_settings.malwarebazaar_key = s_mb_key_buf;
+                    save_api_settings(g_api_settings);
                     if (s_onboard_skip) {
                         if (FILE *f = fopen(bh_path("bh_onboarded.ver").c_str(), "w")) { fputs("1", f); fclose(f); }
                     }
@@ -2341,6 +2459,52 @@ bool UI::render_frame() {
                     ImGui::CloseCurrentPopup();
                     open_file_dialog = true;
                 }
+            }
+
+            ImGui::EndPopup();
+        }
+    }
+
+    // ── API settings modal ──────────────────────────────────────────────
+    if (s_open_settings) {
+        s_open_settings = false;
+        sync_key_buffers(s_vt_key_buf, sizeof(s_vt_key_buf), s_mb_key_buf, sizeof(s_mb_key_buf));
+        ImGui::OpenPopup("##ApiSettings");
+    }
+    {
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, {0.5f, 0.5f});
+        ImGui::SetNextWindowSize({480, 0}, ImGuiCond_Always);
+        if (ImGui::BeginPopupModal("##ApiSettings", nullptr,
+                ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize)) {
+            const ImVec4 kOrange{0.86f, 0.35f, 0.16f, 1.f};
+            const ImVec4 kMuted {0.55f, 0.55f, 0.55f, 1.f};
+
+            ImGui::TextColored(kOrange, "API Settings");
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "Add your own free API keys to enable optional threat-intel lookups. "
+                "Keys are stored locally in your BinaryHammer app-data folder and are "
+                "never transmitted anywhere by BinaryHammer itself.");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            render_api_key_fields(s_vt_key_buf, sizeof(s_vt_key_buf), s_mb_key_buf, sizeof(s_mb_key_buf), kOrange);
+
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::TextColored(kMuted, "Not wired into any panel yet — lookups are on the roadmap.");
+            ImGui::Spacing();
+
+            float win_w = ImGui::GetWindowWidth();
+            float pad   = ImGui::GetStyle().WindowPadding.x;
+            ImGui::SetCursorPosX(win_w - 80.f - pad);
+            if (ImGui::Button("Save", {80, 0})) {
+                g_api_settings.virustotal_key   = s_vt_key_buf;
+                g_api_settings.malwarebazaar_key = s_mb_key_buf;
+                save_api_settings(g_api_settings);
+                ImGui::CloseCurrentPopup();
             }
 
             ImGui::EndPopup();

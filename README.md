@@ -12,7 +12,7 @@ A fast, lightweight PE reverse engineering tool for Windows — built for anyone
 
 Load a PE binary (`.exe`, `.dll`, `.sys`) and immediately get a full analysis — no setup, no scripts, no external tools.
 
-On first launch a 3-page onboarding guide walks you through every panel and how to use them. Re-open it any time from **Help → About / Help**.
+On first launch a 4-page onboarding guide walks you through every panel, how to use them, and optional API key setup. Re-open it any time from **Help → About / Help**.
 
 ### Analysis & Overview
 - **Threat Overview** — 0–100 threat score with colour-coded verdict (Likely Clean / Suspicious / Likely Malicious / Highly Suspicious). Plain-English summary of what the binary does, key findings bullet list, and a "Is This Normal?" table comparing each property to expected ranges. Import behaviour category badges show at a glance what capability groups are present.
@@ -39,6 +39,7 @@ On first launch a 3-page onboarding guide walks you through every panel and how 
 - **Search** — search across strings, imports, and function names.
 - **Bookmarks** — save and name any RVA, jump back instantly.
 - **Console** — built-in command line with `.info`, `.strings`, `.goto <rva>`, and `.help`.
+- **Settings → API Keys** — store optional VirusTotal / MalwareBazaar API keys locally for future threat-intel lookups. Keys never leave your machine. Set up during onboarding or any time after.
 
 ---
 
@@ -91,7 +92,7 @@ git clone https://github.com/harryc295/Binary-slammer.git
 cd Binary-slammer
 cmake -S . -B build
 cmake --build build --config Release
-.\build\Release\app.exe
+.\build\Release\binaryslammer.exe
 ```
 
 vcpkg handles all dependencies automatically via `vcpkg.json`.
@@ -112,8 +113,8 @@ ImGui (docking branch) is bundled in `incl/`.
 
 ## Usage
 
-1. Launch `app.exe` — the window opens maximised with a custom app icon.
-2. A **3-page onboarding guide** appears on first run, covering every panel and workflow. Dismiss it and it won't show again; reopen it any time via **Help → About / Help**.
+1. Launch `binaryslammer.exe` — the window opens maximised with a custom app icon.
+2. A **4-page onboarding guide** appears on first run, covering every panel, workflow, and optional API key setup. Dismiss it and it won't show again; reopen it any time via **Help → About / Help**.
 3. **File → Open** (or `Ctrl+O`) to load a PE.
 4. The **Overview** panel gives an immediate threat assessment.
 5. Use **Function Explorer** to navigate functions — **Disassembly** and **Pseudo Code** update instantly.
@@ -180,6 +181,8 @@ src/
 │   └── file_prompt.h         — Windows IFileOpenDialog wrapper
 ├── data/
 │   ├── api_descriptions.h    — Win32 API descriptions with malware context
+│   ├── api_settings.h        — VirusTotal / MalwareBazaar API key persistence
+│   ├── open_url.h             — opens a URL in the system browser (sign-up links)
 │   └── section_flags.h       — IMAGE_SCN_* flag descriptions
 ├── assets/
 │   └── icon.ico              — multi-resolution icon (16/32/48px) for the exe
