@@ -116,6 +116,12 @@ cmake --build build --config Release
 
 `zenity` or `kdialog` is used for the native file-open dialog — install whichever your desktop ships with.
 
+**Distro compatibility:** this is a from-source build, so it's not tied to one distro — you're compiling against whatever libs are already on your system rather than running a binary built elsewhere. Any apt-based distro (Ubuntu, Debian, **Kali**, ...) works with the package list above as-is; on dnf/pacman-based distros (Fedora, Arch, ...) swap in the equivalent `-devel`/non-suffixed package names for the same headers.
+
+Two things that vary by setup, not by distro:
+- **File dialog:** Kali's default Xfce spin doesn't ship `zenity` or `kdialog` — run `sudo apt install zenity` if the open-file dialog comes back empty.
+- **Rendering:** needs an OpenGL 3.0 context. On bare metal this is never an issue. In a VM (common for Kali) without 3D acceleration/GPU passthrough enabled, it falls back to Mesa's software renderer (`llvmpipe`) — same visuals, just slower.
+
 ### Dependencies
 
 | Package | Purpose | Required |
